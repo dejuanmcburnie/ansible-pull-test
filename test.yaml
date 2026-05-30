@@ -12,6 +12,15 @@
           ansible-pull worked
           hostname={{ ansible_hostname }}
           date={{ ansible_date_time.iso8601 }}
+        
+    - name: Ensure curl is installed
+      package:
+        name: curl
+        state: present
+
+    - name: Record curl path
+      shell: "command -v curl > /tmp/curl-path.txt"
+      changed_when: false
 
     - name: Show success message
       debug:
