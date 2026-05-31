@@ -14,7 +14,7 @@
     vind_kubeconfig_dir: "{{ vind_home }}/.kube"
 
     vind_user: user
-    vind_cluster_prefix: staging-cluster
+    vind_cluster_name: staging-cluster-1
 
     test_namespace: staging
     test_app_name: web-app
