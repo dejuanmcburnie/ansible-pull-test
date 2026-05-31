@@ -366,10 +366,18 @@
     #   changed_when: "'deleted' in (pre_delete_result.stdout | lower)"
     #   when: cleanup_existing_cluster_first | bool
 
-    # - name: Remove old snapshot file
-    #   ansible.builtin.file:
-    #     path: "{{ snapshot_path }}"
-    #     state: absent
+    - name: Remove old snapshot file
+      ansible.builtin.file:
+        path: "{{ snapshot_path }}"
+        state: absent
+
+    - name: Generate random vind cluster name
+      ansible.builtin.set_fact:
+        vind_cluster_name: "{{ vind_cluster_prefix }}-{{ ansible_date_time.epoch }}-{{ 9999 | random }}"
+
+    - name: Set snapshot path for randomized cluster
+      ansible.builtin.set_fact:
+        snapshot_path: "{{ backup_dir }}/{{ vind_cluster_name }}.tar.gz"
 
     - name: Set unique test marker
       ansible.builtin.set_fact:
