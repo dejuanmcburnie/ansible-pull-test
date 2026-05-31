@@ -13,7 +13,7 @@
     vind_home: "/home/{{ vind_user }}"
     vind_kubeconfig_dir: "{{ vind_home }}/.kube"
 
-    vind_user: root
+    vind_user: user
     vind_cluster_name: my-project
 
     test_namespace: production
