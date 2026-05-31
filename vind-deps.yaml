@@ -1,0 +1,73 @@
+---
+- name: Install dependencies for vind cluster creation
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    vind_user: user
+
+    # Match your vind/basic-cluster.yaml Kubernetes version if needed
+    kubectl_version: "v1.34.0"
+
+    # Use "latest" or pin a version like "v0.31.0"
+    vcluster_version: "latest"
+
+    vind_home: "/home/{{ vind_user }}"
+
+  tasks:
+    - name: Map CPU architecture
+      ansible.builtin.set_fact:
+        linux_arch: "{{ arch_map[ansible_architecture] | default(ansible_architecture) }}"
+      vars:
+        arch_map:
+          x86_64: amd64
+          aarch64: arm64
+          arm64: arm64
+          amd64: amd64
+
+    - name: Set vCluster download URL
+      ansible.builtin.set_fact:
+        vcluster_download_url: >-
+          {{
+            'https://github.com/loft-sh/vcluster/releases/latest/download/vcluster-linux-' ~ linux_arch
+            if vcluster_version == 'latest'
+            else
+            'https://github.com/loft-sh/vcluster/releases/download/' ~ vcluster_version ~ '/vcluster-linux-' ~ linux_arch
+          }}
+
+    - name: Install OS packages required for vind/vcluster Docker mode
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - wget
+          - gnupg
+          - git
+          - iproute2
+          - iptables
+          - uidmap
+          - conntrack
+          - socat
+          - dbus
+          - docker.io
+          - python3
+          - python3-apt
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Add vind user to docker group
+      ansible.builtin.user:
+        name: "{{ vind_user }}"
+        groups: docker
+        append: true
+      when: vind_user != "root"
+
+    - name: Create
