@@ -7,6 +7,12 @@
 
   vars:
     # Pin these as needed
+    nfs_mount_point: /mnt/vind-backing
+    
+    work_dir: "{{ nfs_mount_point }}/work"
+    backup_dir: "{{ nfs_mount_point }}/backups"
+    snapshot_path: "{{ vind_cluster_name }}.tar.gz"
+    
     kubectl_version: "v1.34.0"
     vcluster_version: "latest"
 
@@ -20,9 +26,9 @@
     test_namespace: staging
     test_app_name: web-app
 
-    work_dir: /opt/vind-snapshot-test
-    backup_dir: /opt/vind-snapshot-test/backups
-    snapshot_path: "/opt/vind-snapshot-test/backups/{{ vind_cluster_name }}.tar.gz"
+    # work_dir: /opt/vind-snapshot-test
+    # backup_dir: /opt/vind-snapshot-test/backups
+    # snapshot_path: "/opt/vind-snapshot-test/backups/{{ vind_cluster_name }}.tar.gz"
     app_manifest_path: /opt/vind-snapshot-test/stateful-test-app.yaml
 
     wait_before_delete_seconds: 300
