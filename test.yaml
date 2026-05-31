@@ -91,6 +91,8 @@
           - docker.io
           - python3
           - python3-apt
+          - e2fsprogs
+          - util-linux
         state: present
         update_cache: true
 
@@ -168,6 +170,78 @@
     #     - kubectl
     #   register: required_commands
     #   changed_when: false
+
+    - name: Stop Docker and containerd before moving runtime storage
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - docker
+        - containerd
+      failed_when: false
+
+    - name: Create ext4-backed runtime storage for PXE live system
+      ansible.builtin.shell: |
+        set -eux
+
+        RUNTIME_IMG="/run/vind-runtime.img"
+        RUNTIME_MOUNT="/var/lib/vind-runtime"
+
+        mkdir -p "${RUNTIME_MOUNT}"
+
+        if ! findmnt -n "${RUNTIME_MOUNT}" >/dev/null 2>&1; then
+          rm -f "${RUNTIME_IMG}"
+          truncate -s 20G "${RUNTIME_IMG}"
+          mkfs.ext4 -F "${RUNTIME_IMG}"
+          mount -o loop "${RUNTIME_IMG}" "${RUNTIME_MOUNT}"
+        fi
+
+        mkdir -p "${RUNTIME_MOUNT}/docker"
+        mkdir -p "${RUNTIME_MOUNT}/containerd"
+
+        mkdir -p /var/lib/docker
+        mkdir -p /var/lib/containerd
+
+        if ! findmnt -n /var/lib/docker >/dev/null 2>&1; then
+          mount --bind "${RUNTIME_MOUNT}/docker" /var/lib/docker
+        fi
+
+        if ! findmnt -n /var/lib/containerd >/dev/null 2>&1; then
+          mount --bind "${RUNTIME_MOUNT}/containerd" /var/lib/containerd
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Configure Docker DNS
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: |
+          {
+            "dns": ["8.8.8.8", "1.1.1.1"]
+          }
+
+    - name: Start containerd
+      ansible.builtin.systemd:
+        name: containerd
+        state: started
+        enabled: true
+
+    - name: Start Docker
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Verify runtime storage is not on live overlay
+      ansible.builtin.command: "findmnt -T /var/lib/containerd"
+      register: containerd_mount_result
+      changed_when: false
+
+    - name: Show containerd mount
+      ansible.builtin.debug:
+        var: containerd_mount_result.stdout_lines
 
     - name: Create work directories
       ansible.builtin.file:
