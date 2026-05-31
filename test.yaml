@@ -87,14 +87,14 @@
       ansible.builtin.file:
         path: "{{ nfs_mount_point }}"
         state: directory
-        owner: "{{ nfs_mount_owner }}"
-        group: "{{ nfs_mount_group }}"
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
         mode: "0755"
 
     - name: Add NFS mount to fstab
       ansible.builtin.lineinfile:
         path: /etc/fstab
-        regexp: '^{{ nfs_server | regex_escape }}:{{ nfs_export | regex_escape }}\s+{{ nfs_mount_point | regex_escape }}\s+'
+        regexp: "^{{ nfs_server | regex_escape }}:{{ nfs_export | regex_escape }}\\s+{{ nfs_mount_point | regex_escape }}\\s+"
         line: "{{ nfs_server }}:{{ nfs_export }} {{ nfs_mount_point }} nfs4 defaults,nofail,_netdev,x-systemd.automount,x-systemd.device-timeout=10 0 0"
         state: present
         create: true
@@ -105,10 +105,14 @@
         daemon_reload: true
 
     - name: Mount NFS filesystem
-      ansible.builtin.command: "mount {{ nfs_mount_point }}"
+      ansible.builtin.shell: |
+        set -eux
+        mkdir -p "{{ nfs_mount_point }}"
+        mountpoint -q "{{ nfs_mount_point }}" || mount "{{ nfs_mount_point }}"
+      args:
+        executable: /bin/bash
       register: mount_nfs_result
-      changed_when: mount_nfs_result.rc == 0
-      failed_when: mount_nfs_result.rc != 0 and 'already mounted' not in mount_nfs_result.stderr | lower
+      changed_when: true
 
     - name: Verify NFS mount
       ansible.builtin.command: "findmnt {{ nfs_mount_point }}"
@@ -119,14 +123,16 @@
       ansible.builtin.debug:
         var: findmnt_result.stdout_lines
 
-    - name: Test write access to NFS mount
-      ansible.builtin.copy:
-        dest: "{{ nfs_mount_point }}/ansible-nfs-write-test.txt"
-        content: "NFS write test from {{ ansible_hostname }}\n"
-        owner: "{{ nfs_mount_owner }}"
-        group: "{{ nfs_mount_group }}"
-        mode: "0644"
-
+    - name: Create NFS-backed vind work directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
+        mode: "0755"
+      loop:
+        - "{{ work_dir }}"
+        - "{{ backup_dir }}"
     - name: Create NFS-backed vind work directories
         ansible.builtin.file:
           path: "{{ item }}"
