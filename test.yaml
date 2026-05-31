@@ -6,14 +6,31 @@
   gather_facts: true
 
   vars:
-    vind_user: user
-
     # Pin these as needed
     kubectl_version: "v1.34.0"
     vcluster_version: "latest"
 
     vind_home: "/home/{{ vind_user }}"
     vind_kubeconfig_dir: "{{ vind_home }}/.kube"
+
+    vind_user: user
+    vind_cluster_name: my-project
+
+    test_namespace: production
+    test_app_name: web-app
+
+    work_dir: /opt/vind-snapshot-test
+    backup_dir: /opt/vind-snapshot-test/backups
+    snapshot_path: "/opt/vind-snapshot-test/backups/{{ vind_cluster_name }}.tar.gz"
+    app_manifest_path: /opt/vind-snapshot-test/stateful-test-app.yaml
+
+    wait_before_delete_seconds: 300
+    wait_after_restore_seconds: 30
+
+    vind_home: "/home/{{ vind_user }}"
+    vind_kubeconfig: "/home/{{ vind_user }}/.kube/config"
+
+    cleanup_existing_cluster_first: true
 
   tasks:
     - name: Create test file
@@ -142,3 +159,319 @@
           - "{{ docker_version_result.stdout_lines }}"
           - "{{ vcluster_version_result.stdout_lines }}"
           - "{{ kubectl_version_result.stdout_lines }}"
+
+    - name: Verify required commands exist
+      ansible.builtin.command: "command -v {{ item }}"
+      loop:
+        - docker
+        - vcluster
+        - kubectl
+      register: required_commands
+      changed_when: false
+
+    - name: Create work directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
+        mode: "0755"
+      loop:
+        - "{{ work_dir }}"
+        - "{{ backup_dir }}"
+        - "{{ vind_home }}/.kube"
+
+    - name: Set vCluster driver to Docker
+      ansible.builtin.command: vcluster use driver docker
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: vcluster_driver_result
+      changed_when: "'docker' in (vcluster_driver_result.stdout | lower)"
+
+    - name: Delete existing test cluster before starting
+      ansible.builtin.command: "vcluster delete {{ vind_cluster_name }} --ignore-not-found"
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: pre_delete_result
+      changed_when: "'deleted' in (pre_delete_result.stdout | lower)"
+      when: cleanup_existing_cluster_first | bool
+
+    - name: Remove old snapshot file
+      ansible.builtin.file:
+        path: "{{ snapshot_path }}"
+        state: absent
+
+    - name: Set unique test marker
+      ansible.builtin.set_fact:
+        snapshot_test_id: "vind-snapshot-test-{{ ansible_date_time.epoch }}"
+
+    - name: Create vind cluster
+      ansible.builtin.command: "vcluster create {{ vind_cluster_name }}"
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: create_cluster_result
+      changed_when: true
+
+    - name: Wait for cluster API to respond
+      ansible.builtin.command: kubectl get nodes
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: kubectl_nodes_result
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: kubectl_nodes_result.rc == 0
+
+    - name: Write stateful test application manifest
+      ansible.builtin.copy:
+        dest: "{{ app_manifest_path }}"
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
+        mode: "0644"
+        content: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: {{ test_namespace }}
+          ---
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: app-config
+            namespace: {{ test_namespace }}
+          data:
+            APP_VERSION: "3.2.1"
+            ENVIRONMENT: "production"
+            SNAPSHOT_TEST_ID: "{{ snapshot_test_id }}"
+          ---
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: app-storage
+            namespace: {{ test_namespace }}
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 100Mi
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: {{ test_app_name }}
+            namespace: {{ test_namespace }}
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: {{ test_app_name }}
+            template:
+              metadata:
+                labels:
+                  app: {{ test_app_name }}
+              spec:
+                containers:
+                  - name: app
+                    image: nginx:alpine
+                    ports:
+                      - containerPort: 80
+                    envFrom:
+                      - configMapRef:
+                          name: app-config
+                    volumeMounts:
+                      - name: storage
+                        mountPath: /data
+                    command:
+                      - sh
+                      - -c
+                      - |
+                        if [ ! -f /data/app.log ]; then
+                          echo "snapshot_test_id={{ snapshot_test_id }}" > /data/app.log
+                          echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /data/app.log
+                          echo "persistent_data=survived_restore" >> /data/app.log
+                        fi
+                        nginx -g 'daemon off;'
+                volumes:
+                  - name: storage
+                    persistentVolumeClaim:
+                      claimName: app-storage
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ test_app_name }}
+            namespace: {{ test_namespace }}
+          spec:
+            selector:
+              app: {{ test_app_name }}
+            ports:
+              - port: 80
+                targetPort: 80
+
+    - name: Deploy stateful test application
+      ansible.builtin.command: "kubectl apply -f {{ app_manifest_path }}"
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: app_apply_result
+      changed_when: true
+
+    - name: Wait for test deployment to become available
+      ansible.builtin.command: >
+        kubectl wait --for=condition=available
+        deployment/{{ test_app_name }}
+        -n {{ test_namespace }}
+        --timeout=180s
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      changed_when: false
+
+    - name: Capture original PVC data
+      ansible.builtin.command: >
+        kubectl exec -n {{ test_namespace }}
+        deploy/{{ test_app_name }}
+        -- cat /data/app.log
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: original_app_log
+      changed_when: false
+
+    - name: Show original PVC data
+      ansible.builtin.debug:
+        var: original_app_log.stdout_lines
+
+    - name: Create local snapshot
+      ansible.builtin.command: >
+        vcluster snapshot create {{ vind_cluster_name }} {{ snapshot_path }}
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: snapshot_create_result
+      changed_when: true
+
+    - name: Wait for snapshot file to exist
+      ansible.builtin.wait_for:
+        path: "{{ snapshot_path }}"
+        state: present
+        timeout: 300
+
+    - name: Check snapshot file size
+      ansible.builtin.stat:
+        path: "{{ snapshot_path }}"
+      register: snapshot_stat
+
+    - name: Fail if snapshot file is empty
+      ansible.builtin.fail:
+        msg: "Snapshot file {{ snapshot_path }} was not created or is empty."
+      when: not snapshot_stat.stat.exists or snapshot_stat.stat.size | int == 0
+
+    - name: Wait 5 minutes before deleting cluster
+      ansible.builtin.pause:
+        seconds: "{{ wait_before_delete_seconds }}"
+
+    - name: Delete vind cluster
+      ansible.builtin.command: "vcluster delete {{ vind_cluster_name }} --ignore-not-found"
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: delete_cluster_result
+      changed_when: true
+
+    - name: Restore vind cluster from snapshot
+      ansible.builtin.command: >
+        vcluster restore {{ vind_cluster_name }} {{ snapshot_path }}
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: restore_cluster_result
+      changed_when: true
+
+    - name: Wait briefly after restore
+      ansible.builtin.pause:
+        seconds: "{{ wait_after_restore_seconds }}"
+
+    - name: Wait for restored cluster API to respond
+      ansible.builtin.command: kubectl get nodes
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: restored_nodes_result
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: restored_nodes_result.rc == 0
+
+    - name: Verify restored resources exist
+      ansible.builtin.command: >
+        kubectl get all,configmap,pvc -n {{ test_namespace }}
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: restored_resources_result
+      changed_when: false
+
+    - name: Wait for restored deployment to become available
+      ansible.builtin.command: >
+        kubectl wait --for=condition=available
+        deployment/{{ test_app_name }}
+        -n {{ test_namespace }}
+        --timeout=180s
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      changed_when: false
+
+    - name: Read restored PVC data
+      ansible.builtin.command: >
+        kubectl exec -n {{ test_namespace }}
+        deploy/{{ test_app_name }}
+        -- cat /data/app.log
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: restored_app_log
+      changed_when: false
+
+    - name: Fail if restored PVC data does not match original data
+      ansible.builtin.fail:
+        msg: |
+          Restored PVC data does not match original data.
+
+          Original:
+          {{ original_app_log.stdout }}
+
+          Restored:
+          {{ restored_app_log.stdout }}
+      when: restored_app_log.stdout != original_app_log.stdout
+
+    - name: Show successful restore verification
+      ansible.builtin.debug:
+        msg:
+          - "vind snapshot/delete/restore test completed successfully."
+          - "Cluster name: {{ vind_cluster_name }}"
+          - "Snapshot path: {{ snapshot_path }}"
+          - "Restored resources:"
+          - "{{ restored_resources_result.stdout_lines }}"
+          - "Restored PVC data:"
+          - "{{ restored_app_log.stdout_lines }}"
