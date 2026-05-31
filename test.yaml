@@ -2,7 +2,7 @@
 - name: Install dependencies for vind cluster creation
   hosts: localhost
   connection: local
-  become: true
+  become: false
   gather_facts: true
 
   vars:
