@@ -142,13 +142,43 @@
         groups: docker
         append: true
 
-    - name: Reset SSH/login group membership by forcing Docker socket group
-      ansible.builtin.file:
-        path: /var/run/docker.sock
-        owner: root
-        group: docker
-        mode: "0660"
-      when: ansible_facts['os_family'] == "Debian"
+    - name: Configure Docker daemon group and DNS
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: |
+          {
+            "group": "docker",
+            "dns": ["8.8.8.8", "1.1.1.1"]
+          }
+
+    - name: Restart Docker after daemon config change
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Wait for Docker socket to exist
+      ansible.builtin.wait_for:
+        path: /run/docker.sock
+        state: present
+        timeout: 30
+
+    - name: Force Docker socket ownership and mode
+      ansible.builtin.shell: |
+        set -eux
+        chgrp docker /run/docker.sock
+        chmod 660 /run/docker.sock
+        ls -l /run/docker.sock
+      args:
+        executable: /bin/bash
+      register: docker_socket_fix
+      changed_when: true
+
+    - name: Show Docker socket permissions
+      ansible.builtin.debug:
+        var: docker_socket_fix.stdout_lines
 
     - name: Verify vind user has docker group
       ansible.builtin.command: "id {{ vind_user }}"
@@ -159,14 +189,19 @@
       ansible.builtin.debug:
         var: vind_user_groups.stdout
 
-    - name: Verify Docker access as vind user
-      ansible.builtin.command: docker ps
+    - name: Verify Docker access as vind user through docker group shell
+      ansible.builtin.shell: |
+        set -eux
+        id
+        sg docker -c 'docker ps'
+      args:
+        executable: /bin/bash
       become_user: "{{ vind_user }}"
       environment:
         HOME: "{{ vind_home }}"
       register: vind_user_docker_ps
       changed_when: false
-
+      
     - name: Set vCluster driver to Docker
       ansible.builtin.command: vcluster use driver docker
       environment:
@@ -338,7 +373,11 @@
         snapshot_test_id: "vind-snapshot-test-{{ ansible_date_time.epoch }}"
 
     - name: Create vind cluster
-      ansible.builtin.command: "vcluster create {{ vind_cluster_name }}"
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster create {{ vind_cluster_name }}'
+      args:
+        executable: /bin/bash
       become_user: "{{ vind_user }}"
       environment:
         HOME: "{{ vind_home }}"
