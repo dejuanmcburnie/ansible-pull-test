@@ -2,7 +2,7 @@
 - name: Install dependencies for vind cluster creation
   hosts: localhost
   connection: local
-  become: false
+  become: true
   gather_facts: true
 
   vars:
@@ -13,7 +13,7 @@
     vind_home: "/home/{{ vind_user }}"
     vind_kubeconfig_dir: "{{ vind_home }}/.kube"
 
-    vind_user: user
+    vind_user: root
     vind_cluster_name: my-project
 
     test_namespace: production
