@@ -102,6 +102,9 @@
         enabled: true
         state: started
 
+    - name: Correct docker permissions
+      shell: "sudo usermod -aG docker $USER ; newgrp docker"
+
     - name: Add vind user to docker group
       ansible.builtin.user:
         name: "{{ vind_user }}"
@@ -353,20 +356,20 @@
       register: vcluster_driver_result
       changed_when: "'docker' in (vcluster_driver_result.stdout | lower)"
 
-    - name: Delete existing test cluster before starting
-      ansible.builtin.command: "vcluster delete {{ vind_cluster_name }} --ignore-not-found"
-      become_user: "{{ vind_user }}"
-      environment:
-        HOME: "{{ vind_home }}"
-        KUBECONFIG: "{{ vind_kubeconfig }}"
-      register: pre_delete_result
-      changed_when: "'deleted' in (pre_delete_result.stdout | lower)"
-      when: cleanup_existing_cluster_first | bool
+    # - name: Delete existing test cluster before starting
+    #   ansible.builtin.command: "vcluster delete {{ vind_cluster_name }} --ignore-not-found"
+    #   become_user: "{{ vind_user }}"
+    #   environment:
+    #     HOME: "{{ vind_home }}"
+    #     KUBECONFIG: "{{ vind_kubeconfig }}"
+    #   register: pre_delete_result
+    #   changed_when: "'deleted' in (pre_delete_result.stdout | lower)"
+    #   when: cleanup_existing_cluster_first | bool
 
-    - name: Remove old snapshot file
-      ansible.builtin.file:
-        path: "{{ snapshot_path }}"
-        state: absent
+    # - name: Remove old snapshot file
+    #   ansible.builtin.file:
+    #     path: "{{ snapshot_path }}"
+    #     state: absent
 
     - name: Set unique test marker
       ansible.builtin.set_fact:
