@@ -14,9 +14,9 @@
     vind_kubeconfig_dir: "{{ vind_home }}/.kube"
 
     vind_user: user
-    vind_cluster_name: my-project
+    vind_cluster_prefix: staging-cluster
 
-    test_namespace: production
+    test_namespace: staging
     test_app_name: web-app
 
     work_dir: /opt/vind-snapshot-test
