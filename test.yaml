@@ -131,6 +131,42 @@
         mode: "0755"
         force: true
 
+    - name: Ensure docker group exists
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Add vind user to docker group
+      ansible.builtin.user:
+        name: "{{ vind_user }}"
+        groups: docker
+        append: true
+
+    - name: Reset SSH/login group membership by forcing Docker socket group
+      ansible.builtin.file:
+        path: /var/run/docker.sock
+        owner: root
+        group: docker
+        mode: "0660"
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Verify vind user has docker group
+      ansible.builtin.command: "id {{ vind_user }}"
+      register: vind_user_groups
+      changed_when: false
+
+    - name: Show vind user groups
+      ansible.builtin.debug:
+        var: vind_user_groups.stdout
+
+    - name: Verify Docker access as vind user
+      ansible.builtin.command: docker ps
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+      register: vind_user_docker_ps
+      changed_when: false
+
     - name: Set vCluster driver to Docker
       ansible.builtin.command: vcluster use driver docker
       environment:
