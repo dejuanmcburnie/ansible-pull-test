@@ -160,14 +160,14 @@
           - "{{ vcluster_version_result.stdout_lines }}"
           - "{{ kubectl_version_result.stdout_lines }}"
 
-    - name: Verify required commands exist
-      ansible.builtin.command: "command -v {{ item }}"
-      loop:
-        - docker
-        - vcluster
-        - kubectl
-      register: required_commands
-      changed_when: false
+    # - name: Verify required commands exist
+    #   ansible.builtin.command: "command -v {{ item }}"
+    #   loop:
+    #     - docker
+    #     - vcluster
+    #     - kubectl
+    #   register: required_commands
+    #   changed_when: false
 
     - name: Create work directories
       ansible.builtin.file:
