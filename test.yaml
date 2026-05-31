@@ -254,6 +254,24 @@
         - "{{ work_dir }}"
         - "{{ backup_dir }}"
         - "{{ vind_home }}/.kube"
+        - "{{ vind_home }}/.vcluster"
+
+    - name: Fix ownership of user vcluster and kube config directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
+        recurse: true
+      loop:
+        - "{{ vind_home }}/.kube"
+        - "{{ vind_home }}/.vcluster"
+
+    - name: Remove root-owned or stale vCluster config if present
+      ansible.builtin.file:
+        path: "{{ vind_home }}/.vcluster/config.json"
+        state: absent
+      when: reset_vcluster_config | default(true) | bool
 
     - name: Set vCluster driver to Docker
       ansible.builtin.command: vcluster use driver docker
