@@ -29,7 +29,8 @@
     # work_dir: /opt/vind-snapshot-test
     # backup_dir: /opt/vind-snapshot-test/backups
     # snapshot_path: "/opt/vind-snapshot-test/backups/{{ vind_cluster_name }}.tar.gz"
-    app_manifest_path: /opt/vind-snapshot-test/stateful-test-app.yaml
+    app_manifest_path: "{{ work_dir }}/stateful-test-app.yaml"
+
 
     wait_before_delete_seconds: 300
     wait_after_restore_seconds: 30
