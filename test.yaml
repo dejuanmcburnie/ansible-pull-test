@@ -124,15 +124,15 @@
         var: findmnt_result.stdout_lines
 
     - name: Create NFS-backed vind work directories
-        ansible.builtin.file:
-          path: "{{ item }}"
-          state: directory
-          owner: "{{ vind_user }}"
-          group: "{{ vind_user }}"
-          mode: "0755"
-        loop:
-          - "{{ work_dir }}"
-          - "{{ backup_dir }}"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
+        mode: "0755"
+      loop:
+        - "{{ work_dir }}"
+        - "{{ backup_dir }}"
 
     - name: Set vCluster download URL
       ansible.builtin.set_fact:
