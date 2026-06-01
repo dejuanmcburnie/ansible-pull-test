@@ -136,19 +136,21 @@
 
     - name: Find latest snapshot for each previous vCluster
       ansible.builtin.shell: |
-        set -e
-
+        set -euo pipefail
+    
         CLUSTER="{{ item }}"
-
-        ls -1t "{{ backup_dir }}/${CLUSTER}"*.tar.gz 2>/dev/null | head -n 1 || true
+    
+        find "/mnt/vind-backing/backups/${CLUSTER}" \
+          -type f \
+          -name "${CLUSTER}*.tar.gz" \
+          -printf '%T@ %p\n' 2>/dev/null \
+          | sort -nr \
+          | awk 'NR==1 {print $2}'
       args:
         executable: /bin/bash
       loop: "{{ previous_vcluster_names | default([]) }}"
       register: previous_vcluster_latest_snapshots
       changed_when: false
-      when:
-        - restore_clusters_from_inventory | bool
-        - previous_vcluster_names | default([]) | length > 0
 
     - name: Show latest snapshot lookup results
       ansible.builtin.debug:
@@ -159,17 +161,14 @@
     - name: Restore previous vClusters from latest snapshots
       ansible.builtin.shell: |
         set -eux
-
+    
         CLUSTER="{{ item.item }}"
         SNAPSHOT="{{ item.stdout | trim }}"
-
+    
         sg docker -c 'vcluster use driver docker'
-
-        # Remove any existing Docker containers for this cluster before restore.
         sg docker -c "docker ps -aq --filter name=${CLUSTER} | xargs -r docker rm -f"
-
-        # Restore the cluster from its latest snapshot.
         sg docker -c "vcluster restore ${CLUSTER} ${SNAPSHOT}"
+        sg docker -c "vcluster connect ${CLUSTER} --driver docker -- kubectl get nodes -o wide"
       args:
         executable: /bin/bash
       become_user: "{{ vind_user }}"
@@ -182,7 +181,6 @@
       register: restored_previous_vclusters
       changed_when: true
       when:
-        - restore_clusters_from_inventory | bool
         - item.stdout | default('') | trim | length > 0
 
     - name: Connect to each restored previous vCluster and verify nodes
