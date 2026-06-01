@@ -1,19 +1,65 @@
 ---
-- name: Install dependencies for vind cluster creation
+- name: Restore vind clusters on boot
   hosts: localhost
   connection: local
   become: true
   gather_facts: true
 
   vars:
-    vind_user: user
-
     # Pin these as needed
+
+    # Git repo that stores clusters/<hostname>.txt
+    vcluster_inventory_repo_url: "git@github.com:dejuanmcburnie/ansible-pull-test.git"
+    vcluster_inventory_repo_branch: "main"
+    vcluster_inventory_repo_dir: "/opt/vcluster-inventory-repo"
+    vcluster_inventory_subdir: "clusters"
+
+    # For ansible-pull running as root on the PXE client
+    github_ssh_key_path: "/root/.ssh/github_vcluster_inventory"
+
+    # Use ansible_hostname for ansible-pull; override with -e if needed
+    cluster_inventory_host_key: "{{ ansible_hostname | default(inventory_hostname) }}"
+
+    restore_clusters_from_inventory: true
+
+    nfs_mount_point: /mnt/vind-backing
+    
+    work_dir: "{{ nfs_mount_point }}/work"
+    backup_dir: "{{ nfs_mount_point }}/backups"
+    snapshot_path: "{{ vind_cluster_name }}.tar.gz"
+    
     kubectl_version: "v1.34.0"
     vcluster_version: "latest"
 
     vind_home: "/home/{{ vind_user }}"
     vind_kubeconfig_dir: "{{ vind_home }}/.kube"
+
+    vind_user: user
+    vind_cluster_name: staging-cluster-1
+    vind_cluster_prefix: staging-cluster-1
+
+    test_namespace: staging
+    test_app_name: web-app
+
+    # work_dir: /opt/vind-snapshot-test
+    # backup_dir: /opt/vind-snapshot-test/backups
+    # snapshot_path: "/opt/vind-snapshot-test/backups/{{ vind_cluster_name }}.tar.gz"
+    app_manifest_path: "{{ work_dir }}/stateful-test-app.yaml"
+
+
+    wait_before_delete_seconds: 120
+    wait_after_restore_seconds: 30
+
+    vind_home: "/home/{{ vind_user }}"
+    vind_kubeconfig: "/home/{{ vind_user }}/.kube/config"
+
+    cleanup_existing_cluster_first: true
+
+    nfs_server: "192.168.68.50"
+    nfs_export: "/srv/nfs/vind-backing"
+    nfs_mount_point: "/mnt/vind-backing"
+    nfs_mount_owner: "user"
+    nfs_mount_group: "user"
 
   tasks:
     - name: Clone or update vCluster inventory repo
