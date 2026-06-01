@@ -32,7 +32,7 @@
     app_manifest_path: "{{ work_dir }}/stateful-test-app.yaml"
 
 
-    wait_before_delete_seconds: 300
+    wait_before_delete_seconds: 120
     wait_after_restore_seconds: 30
 
     vind_home: "/home/{{ vind_user }}"
@@ -629,18 +629,41 @@
         msg: "Snapshot file {{ snapshot_path }} was not created or is empty."
       when: not snapshot_stat.stat.exists or snapshot_stat.stat.size | int == 0
 
-    - name: Wait 5 minutes before deleting cluster
+    - name: Wait 2 minutes before deleting cluster
       ansible.builtin.pause:
         seconds: "{{ wait_before_delete_seconds }}"
 
     - name: Delete vind cluster
-      ansible.builtin.command: "vcluster delete {{ vind_cluster_name }} --ignore-not-found"
-      become_user: "{{ vind_user }}"
-      environment:
-        HOME: "{{ vind_home }}"
-        KUBECONFIG: "{{ vind_kubeconfig }}"
-      register: delete_cluster_result
-      changed_when: true
+      block:
+        - name: Delete vind cluster using vcluster
+          ansible.builtin.shell: |
+            set -eux
+            sg docker -c 'vcluster delete {{ vind_cluster_name }} --ignore-not-found'
+          args:
+            executable: /bin/bash
+          become_user: "{{ vind_user }}"
+          environment:
+            HOME: "{{ vind_home }}"
+            KUBECONFIG: "{{ vind_kubeconfig }}"
+          register: delete_cluster_result
+          changed_when: true
+
+      rescue:
+        - name: Fallback delete vind Docker containers
+          ansible.builtin.shell: |
+            set -eux
+            sg docker -c 'docker ps -aq --filter name={{ vind_cluster_name }} | xargs -r docker rm -f'
+          args:
+            executable: /bin/bash
+          become_user: "{{ vind_user }}"
+          environment:
+            HOME: "{{ vind_home }}"
+          register: fallback_delete_result
+          changed_when: true
+
+        - name: Show fallback delete result
+          ansible.builtin.debug:
+            var: fallback_delete_result.stdout_lines
 
     - name: Restore vind cluster from snapshot
       ansible.builtin.command: >
