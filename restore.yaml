@@ -15,14 +15,12 @@
     vcluster_inventory_subdir: "clusters"
 
     # For ansible-pull running as root on the PXE client
-    github_ssh_key_path: "/root/.ssh/github_vcluster_inventory"
+    # github_ssh_key_path: "/root/.ssh/github_vcluster_inventory"
 
     # Use ansible_hostname for ansible-pull; override with -e if needed
     cluster_inventory_host_key: "{{ ansible_hostname | default(inventory_hostname) }}"
 
     restore_clusters_from_inventory: true
-
-    nfs_mount_point: /mnt/vind-backing
     
     work_dir: "{{ nfs_mount_point }}/work"
     backup_dir: "{{ nfs_mount_point }}/backups"
@@ -49,9 +47,6 @@
 
     wait_before_delete_seconds: 120
     wait_after_restore_seconds: 30
-
-    vind_home: "/home/{{ vind_user }}"
-    vind_kubeconfig: "/home/{{ vind_user }}/.kube/config"
 
     cleanup_existing_cluster_first: true
 
