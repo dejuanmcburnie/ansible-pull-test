@@ -208,3 +208,14 @@
       when:
         - restore_clusters_from_inventory | bool
         - item is not skipped
+
+    - name: Run third ansible-pull directly
+      ansible.builtin.command: >
+        ansible-pull
+        -U https://github.com/dejuanmcburnie/ansible-pull-test.git
+        -C main
+        -i localhost,
+        -c local
+        nginx-vcluster-lb-map.yaml
+      register: third_ansible_pull_result
+      changed_when: true
