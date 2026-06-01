@@ -9,7 +9,7 @@
     # Pin these as needed
 
     # Git repo that stores clusters/<hostname>.txt
-    vcluster_inventory_repo_url: "git@github.com:dejuanmcburnie/ansible-pull-test.git"
+    vcluster_inventory_repo_url: "https://github.com/dejuanmcburnie/ansible-pull-test.git"
     vcluster_inventory_repo_branch: "main"
     vcluster_inventory_repo_dir: "/opt/vcluster-inventory-repo"
     vcluster_inventory_subdir: "clusters"
@@ -69,10 +69,6 @@
         version: "{{ vcluster_inventory_repo_branch }}"
         update: true
         accept_hostkey: true
-        key_file: "{{ github_ssh_key_path }}"
-      environment:
-        GIT_SSH_COMMAND: "ssh -i {{ github_ssh_key_path }} -o IdentitiesOnly=yes"
-      when: restore_clusters_from_inventory | bool
 
     - name: Set host inventory file path
       ansible.builtin.set_fact:
