@@ -457,7 +457,8 @@
     - name: Create vind cluster
       ansible.builtin.shell: |
         set -eux
-        sg docker -c 'vcluster create {{ vind_cluster_name }}'
+        sg docker -c 'vcluster use driver docker'
+        sg docker -c 'vcluster create {{ vind_cluster_name }} --driver docker'
       args:
         executable: /bin/bash
       become_user: "{{ vind_user }}"
@@ -604,8 +605,18 @@
         var: original_app_log.stdout_lines
 
     - name: Create local snapshot
-      ansible.builtin.command: >
-        vcluster snapshot create {{ vind_cluster_name }} {{ snapshot_path }}
+      ansible.builtin.shell: |
+        set -eux
+
+        sg docker -c 'vcluster use driver docker'
+
+        sg docker -c 'docker ps -a --format "{{ "{{" }}.Names{{ "}}" }}" | grep -E "{{ vind_cluster_name }}|vcluster" || true'
+
+        sg docker -c 'vcluster list'
+
+        sg docker -c 'vcluster snapshot create {{ vind_cluster_name }} {{ snapshot_path }}'
+      args:
+        executable: /bin/bash
       become_user: "{{ vind_user }}"
       environment:
         HOME: "{{ vind_home }}"
