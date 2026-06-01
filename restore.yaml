@@ -7,7 +7,11 @@
 
   vars:
     # Pin these as needed
-
+    vind_kubeconfig: "{{ vind_home }}/.kube/config"
+  
+    restore_clusters_from_inventory: true
+  
+    backup_root: "{{ nfs_mount_point }}/backups"
     # Git repo that stores clusters/<hostname>.txt
     vcluster_inventory_repo_url: "https://github.com/dejuanmcburnie/ansible-pull-test.git"
     vcluster_inventory_repo_branch: "main"
