@@ -644,37 +644,27 @@
       ansible.builtin.pause:
         seconds: "{{ wait_before_delete_seconds }}"
 
-    - name: Delete vind cluster
-      block:
-        - name: Delete vind cluster using vcluster
-          ansible.builtin.shell: |
-            set -eux
-            sg docker -c 'vcluster delete {{ vind_cluster_name }} --ignore-not-found'
-          args:
-            executable: /bin/bash
-          become_user: "{{ vind_user }}"
-          environment:
-            HOME: "{{ vind_home }}"
-            KUBECONFIG: "{{ vind_kubeconfig }}"
-          register: delete_cluster_result
-          changed_when: true
+    - name: Delete vind cluster Docker containers directly
+      ansible.builtin.shell: |
+        set -eux
 
-      rescue:
-        - name: Fallback delete vind Docker containers
-          ansible.builtin.shell: |
-            set -eux
-            sg docker -c 'docker ps -aq --filter name={{ vind_cluster_name }} | xargs -r docker rm -f'
-          args:
-            executable: /bin/bash
-          become_user: "{{ vind_user }}"
-          environment:
-            HOME: "{{ vind_home }}"
-          register: fallback_delete_result
-          changed_when: true
+        sg docker -c '
+          echo "Containers before delete:"
+          docker ps -a --filter "name={{ vind_cluster_name }}" --format "table {{ "{{" }}.Names{{ "}}" }}\t{{ "{{" }}.Status{{ "}}" }}"
 
-        - name: Show fallback delete result
-          ansible.builtin.debug:
-            var: fallback_delete_result.stdout_lines
+          docker ps -aq --filter "name={{ vind_cluster_name }}" | xargs -r docker rm -f
+
+          echo "Containers after delete:"
+          docker ps -a --filter "name={{ vind_cluster_name }}" --format "table {{ "{{" }}.Names{{ "}}" }}\t{{ "{{" }}.Status{{ "}}" }}"
+        '
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: delete_cluster_result
+      changed_when: true
 
     - name: Restore vind cluster from snapshot
       ansible.builtin.command: >
