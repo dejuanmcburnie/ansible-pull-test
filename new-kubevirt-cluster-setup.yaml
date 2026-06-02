@@ -218,9 +218,29 @@
 
     - name: Create fresh vind cluster when no snapshot exists
       ansible.builtin.shell: |
-        set -eux
+        set -euxo pipefail
+
+        CLUSTER="{{ vind_cluster_name }}"
+
         sg docker -c 'vcluster use driver docker'
-        sg docker -c 'vcluster create {{ vind_cluster_name }} --driver docker'
+
+        if ! sg docker -c "vcluster create ${CLUSTER} --driver docker"; then
+          echo "vCluster create failed. Docker diagnostics follow."
+
+          echo "Docker networks:"
+          sg docker -c "docker network ls" || true
+
+          echo "Matching networks:"
+          sg docker -c "docker network ls --format '{{ '{{' }}.Name{{ '}}' }}' | grep ${CLUSTER}" || true
+
+          echo "Matching containers:"
+          sg docker -c "docker ps -a --filter name=${CLUSTER}" || true
+
+          echo "Docker daemon logs:"
+          journalctl -u docker -n 100 --no-pager || true
+
+          exit 1
+        fi
       args:
         executable: /bin/bash
       become_user: "{{ vind_user }}"
