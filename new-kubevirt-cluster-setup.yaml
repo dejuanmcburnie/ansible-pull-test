@@ -38,7 +38,7 @@
     snapshot_timer_name: "vind-snapshot-{{ vind_cluster_name }}.timer"
 
     # KubeVirt / Debian 13 VM settings
-    kubevirt_use_emulation: false
+    kubevirt_use_emulation: true
     kubevirt_vm_name: "debian13-vm"
     kubevirt_vm_rootdisk_name: "{{ kubevirt_vm_name }}-rootdisk"
     kubevirt_vm_memory: "8Gi"
