@@ -1,0 +1,737 @@
+---
+- name: Create or restore vind cluster with test app, load balancer, and recurring snapshots
+  hosts: pxe_clients
+  become: true
+  gather_facts: true
+
+  vars:
+    vcluster_inventory_repo_url: "git@github.com:dejuanmcburnie/ansible-pull-test.git"
+    vcluster_inventory_repo_branch: "main"
+    vcluster_inventory_repo_dir: "/opt/vcluster-inventory-repo"
+    vcluster_inventory_subdir: "clusters"
+    github_ssh_key_path: "/root/.ssh/id_ed25519"
+    vind_user: "user"
+    vind_home: "/home/{{ vind_user }}"
+    vind_kubeconfig: "{{ vind_home }}/.kube/config"
+
+    # Stable cluster name so snapshots/timer know what to target
+    vind_cluster_name: "vind-lb-test"
+
+    test_namespace: "production"
+    test_app_name: "web-app"
+    test_service_name: "web-app-lb"
+
+    # NFS backup/work storage
+    nfs_server: "192.168.68.50"
+    nfs_export: "/srv/nfs/vind-backing"
+    nfs_mount_point: "/mnt/vind-backing"
+
+    work_dir: "{{ nfs_mount_point }}/work/{{ vind_cluster_name }}"
+    backup_dir: "{{ nfs_mount_point }}/backups/{{ vind_cluster_name }}"
+    app_manifest_path: "{{ work_dir }}/stateful-loadbalancer-test.yaml"
+
+    restore_latest_snapshot: true
+    snapshot_retention_count: 48   # 24 hours at every 5 minutes
+
+    snapshot_script_path: "/usr/local/sbin/vind-snapshot-{{ vind_cluster_name }}.sh"
+    snapshot_service_name: "vind-snapshot-{{ vind_cluster_name }}.service"
+    snapshot_timer_name: "vind-snapshot-{{ vind_cluster_name }}.timer"
+
+    # KubeVirt / Debian 13 VM settings
+    kubevirt_use_emulation: false
+    kubevirt_vm_name: "debian13-vm"
+    kubevirt_vm_rootdisk_name: "{{ kubevirt_vm_name }}-rootdisk"
+    kubevirt_vm_memory: "8Gi"
+    kubevirt_vm_cores: 2
+    kubevirt_vm_disk_size: "12Gi"
+
+    # Official Debian 13/Trixie genericcloud qcow2 image
+    debian13_cloud_image_url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+
+    # Cloud-init login for initial testing
+    vm_cloudinit_user: "debian"
+    vm_cloudinit_password: "debian"
+    vm_ssh_public_key: ""
+
+    # Keep your existing service name, but expose HTTPS now
+    test_service_port: 443
+    test_service_target_port: 443
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - jq
+          - nfs-common
+          - docker.io
+          - git
+          - curl
+          - wget
+          - ca-certificates
+          - util-linux
+          - python3
+          - python3-apt
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Ensure docker group exists
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Add vind user to docker group
+      ansible.builtin.user:
+        name: "{{ vind_user }}"
+        groups: docker
+        append: true
+
+    - name: Force Docker socket group and mode
+      ansible.builtin.shell: |
+        set -eux
+        chgrp docker /run/docker.sock
+        chmod 660 /run/docker.sock
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Create NFS mount point
+      ansible.builtin.file:
+        path: "{{ nfs_mount_point }}"
+        state: directory
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
+        mode: "0755"
+
+    - name: Add NFS mount to fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: "^{{ nfs_server | regex_escape }}:{{ nfs_export | regex_escape }}\\s+{{ nfs_mount_point | regex_escape }}\\s+"
+        line: "{{ nfs_server }}:{{ nfs_export }} {{ nfs_mount_point }} nfs4 defaults,nofail,_netdev,x-systemd.automount,x-systemd.device-timeout=10 0 0"
+        state: present
+        create: true
+        backup: true
+
+    - name: Reload systemd after fstab change
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Mount NFS filesystem
+      ansible.builtin.shell: |
+        set -eux
+        mkdir -p "{{ nfs_mount_point }}"
+        mountpoint -q "{{ nfs_mount_point }}" || mount "{{ nfs_mount_point }}"
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Create work and backup directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
+        mode: "0755"
+      loop:
+        - "{{ work_dir }}"
+        - "{{ backup_dir }}"
+        - "{{ vind_home }}/.kube"
+        - "{{ vind_home }}/.vcluster"
+
+    - name: Fix ownership of user kube and vcluster config directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
+        recurse: true
+      loop:
+        - "{{ vind_home }}/.kube"
+        - "{{ vind_home }}/.vcluster"
+
+    - name: Set vCluster driver to Docker
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster use driver docker'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      changed_when: true
+
+    - name: Find existing snapshots
+      ansible.builtin.find:
+        paths: "{{ backup_dir }}"
+        patterns:
+          - "{{ vind_cluster_name }}-*.tar.gz"
+          - "{{ vind_cluster_name }}.tar.gz"
+        file_type: file
+        recurse: false
+      register: found_snapshots
+
+    - name: Set latest snapshot path
+      ansible.builtin.set_fact:
+        snapshot_files_sorted: "{{ found_snapshots.files | sort(attribute='mtime') }}"
+        latest_snapshot_path: "{{ (found_snapshots.files | sort(attribute='mtime') | last).path if (found_snapshots.files | length > 0) else '' }}"
+
+    - name: Show restore decision
+      ansible.builtin.debug:
+        msg:
+          - "Cluster name: {{ vind_cluster_name }}"
+          - "Latest snapshot: {{ latest_snapshot_path | default('none', true) }}"
+          - "Restore latest snapshot: {{ restore_latest_snapshot }}"
+
+    - name: Remove existing Docker containers for this cluster before restore or create
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'docker ps -aq --filter "name={{ vind_cluster_name }}" | xargs -r docker rm -f'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+      changed_when: true
+
+    - name: Restore vind cluster from latest snapshot
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster use driver docker'
+        sg docker -c 'vcluster restore {{ vind_cluster_name }} {{ latest_snapshot_path }}'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: restore_cluster_result
+      changed_when: true
+      when:
+        - restore_latest_snapshot | bool
+        - latest_snapshot_path | length > 0
+
+    - name: Create fresh vind cluster when no snapshot exists
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster use driver docker'
+        sg docker -c 'vcluster create {{ vind_cluster_name }} --driver docker'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: create_cluster_result
+      changed_when: true
+      when: latest_snapshot_path | length == 0
+
+    - name: Wait for vind cluster API to respond
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl get nodes -o wide'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: cluster_api_result
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: cluster_api_result.rc == 0
+
+    - name: Install KubeVirt, CDI, and virtctl into the vCluster
+      ansible.builtin.shell: |
+        set -euxo pipefail
+
+        VC_KUBECTL="vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl"
+
+        KUBEVIRT_RELEASE="$(curl -fsSL https://storage.googleapis.com/kubevirt-prow/release/kubevirt/kubevirt/stable.txt)"
+        echo "Using KubeVirt release: ${KUBEVIRT_RELEASE}"
+
+        sg docker -c "${VC_KUBECTL} apply -f https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_RELEASE}/kubevirt-operator.yaml"
+        sg docker -c "${VC_KUBECTL} apply -f https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_RELEASE}/kubevirt-cr.yaml"
+
+        if [ "{{ kubevirt_use_emulation | bool | lower }}" = "true" ]; then
+          sg docker -c "${VC_KUBECTL} -n kubevirt patch kubevirt kubevirt --type=merge --patch '{\"spec\":{\"configuration\":{\"developerConfiguration\":{\"useEmulation\":true}}}}'"
+        fi
+
+        CDI_LATEST_URL="$(curl -Ls -o /dev/null -w '%{url_effective}' https://github.com/kubevirt/containerized-data-importer/releases/latest)"
+        CDI_RELEASE="${CDI_LATEST_URL##*/}"
+        echo "Using CDI release: ${CDI_RELEASE}"
+
+        sg docker -c "${VC_KUBECTL} apply -f https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_RELEASE}/cdi-operator.yaml"
+        sg docker -c "${VC_KUBECTL} apply -f https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_RELEASE}/cdi-cr.yaml"
+
+        sg docker -c "${VC_KUBECTL} -n kubevirt wait kubevirt kubevirt --for=condition=Available --timeout=900s"
+        sg docker -c "${VC_KUBECTL} -n cdi wait cdi cdi --for=condition=Available --timeout=900s"
+
+        ARCH="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+        curl -fsSL -o /tmp/virtctl "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_RELEASE}/virtctl-${KUBEVIRT_RELEASE}-${ARCH}"
+        install -m 0755 /tmp/virtctl /usr/local/bin/virtctl
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: kubevirt_install_result
+      changed_when: true
+
+
+    - name: Write Debian 13 KubeVirt VM and LoadBalancer manifest
+      ansible.builtin.copy:
+        dest: "{{ app_manifest_path }}"
+        owner: "{{ vind_user }}"
+        group: "{{ vind_user }}"
+        mode: "0644"
+        content: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: {{ test_namespace }}
+          ---
+          apiVersion: cdi.kubevirt.io/v1beta1
+          kind: DataVolume
+          metadata:
+            name: {{ kubevirt_vm_rootdisk_name }}
+            namespace: {{ test_namespace }}
+          spec:
+            source:
+              http:
+                url: "{{ debian13_cloud_image_url }}"
+            storage:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: {{ kubevirt_vm_disk_size }}
+          ---
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: {{ kubevirt_vm_name }}
+            namespace: {{ test_namespace }}
+            labels:
+              app: {{ kubevirt_vm_name }}
+              cluster: {{ vind_cluster_name }}
+          spec:
+            runStrategy: Always
+            template:
+              metadata:
+                labels:
+                  app: {{ kubevirt_vm_name }}
+                  kubevirt-vm: {{ kubevirt_vm_name }}
+              spec:
+                domain:
+                  cpu:
+                    cores: {{ kubevirt_vm_cores }}
+                  resources:
+                    requests:
+                      memory: {{ kubevirt_vm_memory }}
+                  devices:
+                    disks:
+                      - name: rootdisk
+                        disk:
+                          bus: virtio
+                      - name: cloudinitdisk
+                        disk:
+                          bus: virtio
+                    interfaces:
+                      - name: default
+                        masquerade: {}
+                        ports:
+                          - name: https
+                            port: 443
+                networks:
+                  - name: default
+                    pod: {}
+                volumes:
+                  - name: rootdisk
+                    persistentVolumeClaim:
+                      claimName: {{ kubevirt_vm_rootdisk_name }}
+                  - name: cloudinitdisk
+                    cloudInitNoCloud:
+                      userData: |
+                        #cloud-config
+                        hostname: {{ kubevirt_vm_name }}
+                        manage_etc_hosts: true
+                        ssh_pwauth: true
+                        disable_root: false
+                        users:
+                          - name: {{ vm_cloudinit_user }}
+                            groups: sudo
+                            shell: /bin/bash
+                            sudo: ALL=(ALL) NOPASSWD:ALL
+                            lock_passwd: false
+                            plain_text_passwd: "{{ vm_cloudinit_password }}"
+                            ssh_authorized_keys:
+                              - "{{ vm_ssh_public_key }}"
+                        chpasswd:
+                          expire: false
+                        package_update: true
+                        packages:
+                          - openssh-server
+                          - nginx
+                          - openssl
+                        write_files:
+                          - path: /etc/nginx/sites-available/default
+                            owner: root:root
+                            permissions: "0644"
+                            content: |
+                              server {
+                                  listen 443 ssl default_server;
+                                  listen [::]:443 ssl default_server;
+
+                                  ssl_certificate /etc/ssl/certs/vm-selfsigned.crt;
+                                  ssl_certificate_key /etc/ssl/private/vm-selfsigned.key;
+
+                                  location / {
+                                      default_type text/plain;
+                                      return 200 "Debian 13 KubeVirt VM HTTPS service\ncluster={{ vind_cluster_name }}\nvm={{ kubevirt_vm_name }}\n";
+                                  }
+                              }
+                        runcmd:
+                          - systemctl enable ssh
+                          - systemctl restart ssh
+                          - mkdir -p /etc/ssl/private
+                          - openssl req -x509 -nodes -newkey rsa:2048 -days 365 -keyout /etc/ssl/private/vm-selfsigned.key -out /etc/ssl/certs/vm-selfsigned.crt -subj "/CN={{ kubevirt_vm_name }}"
+                          - chmod 600 /etc/ssl/private/vm-selfsigned.key
+                          - nginx -t
+                          - systemctl enable nginx
+                          - systemctl restart nginx
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ test_service_name }}
+            namespace: {{ test_namespace }}
+            labels:
+              app: {{ kubevirt_vm_name }}
+          spec:
+            type: LoadBalancer
+            selector:
+              app: {{ kubevirt_vm_name }}
+            ports:
+              - name: https
+                protocol: TCP
+                port: {{ test_service_port }}
+                targetPort: {{ test_service_target_port }}
+            ---
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: {{ kubevirt_vm_name }}-ssh
+              namespace: {{ test_namespace }}
+              labels:
+                app: {{ kubevirt_vm_name }}
+            spec:
+              type: LoadBalancer
+              selector:
+                app: {{ kubevirt_vm_name }}
+              ports:
+                - name: ssh
+                  protocol: TCP
+                  port: 2222
+                  targetPort: 22
+
+
+    - name: Apply Debian 13 KubeVirt VM and LoadBalancer manifest
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl apply -f {{ app_manifest_path }}'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      changed_when: true
+
+    - name: Wait for Debian 13 DataVolume import to complete
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} wait datavolume/{{ kubevirt_vm_rootdisk_name }} --for=condition=Ready --timeout=1800s'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: datavolume_wait_result
+      changed_when: false
+
+    - name: Wait for Debian 13 VM instance to exist
+      ansible.builtin.shell: |
+        set -eux
+        for i in $(seq 1 120); do
+          if sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} get vmi {{ kubevirt_vm_name }}'; then
+            exit 0
+          fi
+          sleep 5
+        done
+
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} get vm,vmi,pods -o wide'
+        exit 1
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      changed_when: false
+
+    - name: Wait for Debian 13 VM instance to become Ready
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} wait vmi/{{ kubevirt_vm_name }} --for=condition=Ready --timeout=900s'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      changed_when: false
+
+    - name: Wait for nginx HTTPS inside Debian 13 VM through LoadBalancer service
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} run https-check --rm -i --restart=Never --image=curlimages/curl --command -- curl -kfsS https://{{ test_service_name }}.{{ test_namespace }}.svc.cluster.local/'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: vm_https_check_result
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: vm_https_check_result.rc == 0
+
+    - name: Show VM HTTPS check output
+      ansible.builtin.debug:
+        var: vm_https_check_result.stdout_lines
+
+    - name: Show Debian 13 VM, VMI, and LoadBalancer service
+      ansible.builtin.shell: |
+        set -eux
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} get vm,vmi,pod,svc {{ test_service_name }} -o wide'
+      args:
+        executable: /bin/bash
+      become_user: "{{ vind_user }}"
+      environment:
+        HOME: "{{ vind_home }}"
+        KUBECONFIG: "{{ vind_kubeconfig }}"
+      register: vm_lb_result
+      changed_when: false
+
+    - name: Print Debian 13 VM and LoadBalancer service
+      ansible.builtin.debug:
+        var: vm_lb_result.stdout_lines
+
+    - name: Install recurring vind snapshot script
+      ansible.builtin.copy:
+        dest: "{{ snapshot_script_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          VIND_USER="{{ vind_user }}"
+          VIND_HOME="{{ vind_home }}"
+          KUBECONFIG_PATH="{{ vind_kubeconfig }}"
+          CLUSTER_NAME="{{ vind_cluster_name }}"
+          BACKUP_DIR="{{ backup_dir }}"
+          RETENTION_COUNT="{{ snapshot_retention_count }}"
+          LOCK_FILE="/run/vind-snapshot-${CLUSTER_NAME}.lock"
+
+          mkdir -p "$BACKUP_DIR"
+
+          run_as_vind_user() {
+            local cmd="$1"
+            runuser -u "$VIND_USER" -- bash -lc "export HOME='$VIND_HOME'; export KUBECONFIG='$KUBECONFIG_PATH'; sg docker -c '$cmd'"
+          }
+
+          (
+            flock -n 9 || {
+              echo "Snapshot already running for ${CLUSTER_NAME}; exiting."
+              exit 0
+            }
+
+            run_as_vind_user "vcluster use driver docker >/dev/null 2>&1"
+
+            if ! run_as_vind_user "docker ps -a --filter name=vcluster.cp.${CLUSTER_NAME} -q | grep -q ."; then
+              echo "Cluster ${CLUSTER_NAME} is not running; skipping snapshot."
+              exit 0
+            fi
+
+            STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+            TMP_SNAPSHOT="${BACKUP_DIR}/${CLUSTER_NAME}-${STAMP}.tar.gz.tmp"
+            FINAL_SNAPSHOT="${BACKUP_DIR}/${CLUSTER_NAME}-${STAMP}.tar.gz"
+
+            rm -f "$TMP_SNAPSHOT"
+
+            echo "Creating snapshot: $FINAL_SNAPSHOT"
+            run_as_vind_user "vcluster snapshot create ${CLUSTER_NAME} ${TMP_SNAPSHOT}"
+
+            test -s "$TMP_SNAPSHOT"
+            mv "$TMP_SNAPSHOT" "$FINAL_SNAPSHOT"
+            chown "$VIND_USER:$VIND_USER" "$FINAL_SNAPSHOT"
+
+            ls -1t "${BACKUP_DIR}/${CLUSTER_NAME}"-*.tar.gz 2>/dev/null \
+              | tail -n +"$((RETENTION_COUNT + 1))" \
+              | xargs -r rm -f
+
+            echo "Snapshot completed: $FINAL_SNAPSHOT"
+          ) 9>"$LOCK_FILE"
+
+    - name: Install recurring vind snapshot systemd service
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ snapshot_service_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Create recurring vind snapshot for {{ vind_cluster_name }}
+          Wants=network-online.target docker.service
+          After=network-online.target docker.service
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ snapshot_script_path }}
+
+    - name: Install recurring vind snapshot systemd timer
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ snapshot_timer_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run vind snapshot for {{ vind_cluster_name }} every 30 minutes
+
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec=30min
+          AccuracySec=30s
+          Persistent=true
+          Unit={{ snapshot_service_name }}
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Reload systemd units
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start recurring vind snapshot timer
+      ansible.builtin.systemd:
+        name: "{{ snapshot_timer_name }}"
+        enabled: true
+        state: restarted
+
+    - name: Show snapshot timer status
+      ansible.builtin.command: "systemctl list-timers {{ snapshot_timer_name }} --no-pager"
+      register: timer_status_result
+      changed_when: false
+
+    - name: Print snapshot timer status
+      ansible.builtin.debug:
+        var: timer_status_result.stdout_lines
+
+    - name: Clone or update vCluster inventory repo on PXE boot server
+      ansible.builtin.git:
+        repo: "{{ vcluster_inventory_repo_url }}"
+        dest: "{{ vcluster_inventory_repo_dir }}"
+        version: "{{ vcluster_inventory_repo_branch }}"
+        update: true
+        accept_hostkey: true
+        key_file: "{{ github_ssh_key_path }}"
+      delegate_to: localhost
+      become: true
+      throttle: 1
+
+    - name: Ensure vCluster inventory directory exists in repo
+      ansible.builtin.file:
+        path: "{{ vcluster_inventory_repo_dir }}/{{ vcluster_inventory_subdir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+      throttle: 1
+
+    - name: Write vCluster name to host-named file
+      ansible.builtin.copy:
+        dest: "{{ vcluster_inventory_repo_dir }}/{{ vcluster_inventory_subdir }}/{{ inventory_hostname }}.txt"
+        mode: "0644"
+        content: |
+          {{ vind_cluster_name }}
+      delegate_to: localhost
+      become: false
+      throttle: 1
+      register: vcluster_inventory_file
+
+    - name: Configure git author name
+      ansible.builtin.command: git config user.name "dejuanmcburnie"
+      args:
+        chdir: "{{ vcluster_inventory_repo_dir }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      throttle: 1
+
+    - name: Configure git author email
+      ansible.builtin.command: git config user.email "dejuan.mcburnie@payscale.com"
+      args:
+        chdir: "{{ vcluster_inventory_repo_dir }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      throttle: 1
+
+    - name: Check vCluster inventory repo status
+      ansible.builtin.command: git status --porcelain
+      args:
+        chdir: "{{ vcluster_inventory_repo_dir }}"
+      delegate_to: localhost
+      become: false
+      register: vcluster_inventory_git_status
+      changed_when: false
+      throttle: 1
+
+    - name: Commit vCluster inventory file
+      ansible.builtin.shell: |
+        set -eux
+        git add "{{ vcluster_inventory_subdir }}/{{ inventory_hostname }}.txt"
+        git commit -m "Update vCluster inventory for {{ inventory_hostname }}"
+      args:
+        chdir: "{{ vcluster_inventory_repo_dir }}"
+        executable: /bin/bash
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ github_ssh_key_path }} -o IdentitiesOnly=yes"
+      delegate_to: localhost
+      become: true
+      when: vcluster_inventory_git_status.stdout | length > 0
+      throttle: 1
+
+    - name: Push vCluster inventory repo
+      ansible.builtin.command: git push origin "{{ vcluster_inventory_repo_branch }}"
+      args:
+        chdir: "{{ vcluster_inventory_repo_dir }}"
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ github_ssh_key_path }} -o IdentitiesOnly=yes"
+      delegate_to: localhost
+      become: true
+      when: vcluster_inventory_git_status.stdout | length > 0
+      throttle: 1
