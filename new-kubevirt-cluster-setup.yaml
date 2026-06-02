@@ -259,9 +259,8 @@
         sg docker -c "${VC_KUBECTL} apply -f https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_RELEASE}/kubevirt-operator.yaml"
         sg docker -c "${VC_KUBECTL} apply -f https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_RELEASE}/kubevirt-cr.yaml"
 
-        if [ "{{ kubevirt_use_emulation | bool | lower }}" = "true" ]; then
-          sg docker -c "${VC_KUBECTL} -n kubevirt patch kubevirt kubevirt --type=merge --patch '{\"spec\":{\"configuration\":{\"developerConfiguration\":{\"useEmulation\":true}}}}'"
-        fi
+        # Required for your Docker/vind/vCluster setup unless /dev/kvm is truly available.
+        sg docker -c "${VC_KUBECTL} -n kubevirt patch kubevirt kubevirt --type=merge --patch '{\"spec\":{\"configuration\":{\"developerConfiguration\":{\"useEmulation\":true}}}}'"
 
         CDI_LATEST_URL="$(curl -Ls -o /dev/null -w '%{url_effective}' https://github.com/kubevirt/containerized-data-importer/releases/latest)"
         CDI_RELEASE="${CDI_LATEST_URL##*/}"
@@ -270,8 +269,22 @@
         sg docker -c "${VC_KUBECTL} apply -f https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_RELEASE}/cdi-operator.yaml"
         sg docker -c "${VC_KUBECTL} apply -f https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_RELEASE}/cdi-cr.yaml"
 
-        sg docker -c "${VC_KUBECTL} -n kubevirt wait kubevirt kubevirt --for=condition=Available --timeout=900s"
-        sg docker -c "${VC_KUBECTL} -n cdi wait cdi cdi --for=condition=Available --timeout=900s"
+        if ! sg docker -c "${VC_KUBECTL} -n kubevirt wait kubevirt kubevirt --for=condition=Available --timeout=900s"; then
+          echo "KubeVirt did not become Available. Diagnostics:"
+          sg docker -c "${VC_KUBECTL} -n kubevirt get pods -o wide" || true
+          sg docker -c "${VC_KUBECTL} -n kubevirt get kubevirt kubevirt -o yaml" || true
+          sg docker -c "${VC_KUBECTL} -n kubevirt describe kubevirt kubevirt" || true
+          sg docker -c "${VC_KUBECTL} -n kubevirt get events --sort-by=.lastTimestamp | tail -100" || true
+          exit 1
+        fi
+
+        if ! sg docker -c "${VC_KUBECTL} -n cdi wait cdi cdi --for=condition=Available --timeout=900s"; then
+          echo "CDI did not become Available. Diagnostics:"
+          sg docker -c "${VC_KUBECTL} -n cdi get pods -o wide" || true
+          sg docker -c "${VC_KUBECTL} -n cdi describe cdi cdi" || true
+          sg docker -c "${VC_KUBECTL} -n cdi get events --sort-by=.lastTimestamp | tail -100" || true
+          exit 1
+        fi
 
         ARCH="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
         curl -fsSL -o /tmp/virtctl "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_RELEASE}/virtctl-${KUBEVIRT_RELEASE}-${ARCH}"
