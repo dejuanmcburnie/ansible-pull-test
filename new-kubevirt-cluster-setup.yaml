@@ -454,7 +454,7 @@
                         
                           # Run ansible-pull inside the Debian 13 VM.
                           - mkdir -p /var/log/ansible-pull
-                          - ansible-pull -U https://github.com/dejuanmcburnie/ansible-pull-test.git -C main -i localhost, -c local install-docker.yaml > /var/log/ansible-pull/install-docker.log 2>&1
+                          - ansible-pull -U https://github.com/dejuanmcburnie/ansible-pull-test.git -C main -i localhost, -c local install-docker.yaml > /var/log/ansible-pull/install-docker.log 2>&1 || true
                         
                           - mkdir -p /etc/ssl/private
                           - openssl req -x509 -nodes -newkey rsa:2048 -days 365 -keyout /etc/ssl/private/vm-selfsigned.key -out /etc/ssl/certs/vm-selfsigned.crt -subj "/CN={{ kubevirt_vm_name }}"
