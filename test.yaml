@@ -6,8 +6,8 @@
   gather_facts: true
 
   vars:
-    vind_runtime_disk: "/dev/sdb"
-    vind_runtime_partition: "/dev/sdb1"
+    vind_runtime_disk: "/dev/sda"
+    vind_runtime_partition: "/dev/sda1"
     vind_runtime_label: "VINDRUNTIME"
     vind_runtime_mount: "/mnt/vind-runtime-disk"
 
