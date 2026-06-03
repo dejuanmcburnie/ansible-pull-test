@@ -96,60 +96,45 @@
       ansible.builtin.debug:
         var: discovered_vclusters
 
-    - name: Query LoadBalancer services from every vCluster
+    - name: Query LoadBalancer services from every vCluster using kubectl wide output
       ansible.builtin.shell: |
         set -euo pipefail
 
         CLUSTER="{{ item }}"
 
-        sg docker -c "vcluster connect ${CLUSTER} --driver docker -- kubectl get svc -A -o json" \
-          | python3 -c '
-        import json
-        import sys
+        sg docker -c "vcluster connect ${CLUSTER} --driver docker -- kubectl get svc -A --no-headers -o wide" \
+          | awk -v cluster="$CLUSTER" '
+            $3 == "LoadBalancer" && $5 != "<none>" && $5 != "<pending>" {
+              namespace=$1
+              service=$2
+              external_ip=$5
+              ports=$6
 
-        cluster = "'"${CLUSTER}"'"
-        data = json.load(sys.stdin)
+              n=split(ports, portlist, ",")
+              for (i=1; i<=n; i++) {
+                port_entry=portlist[i]
 
-        for svc in data.get("items", []):
-            spec = svc.get("spec", {})
-            if spec.get("type") != "LoadBalancer":
-                continue
+                # Examples:
+                # 443:31398/TCP
+                # 2222:31569/TCP
+                # 80/TCP
 
-            ingress = svc.get("status", {}).get("loadBalancer", {}).get("ingress", [])
-            if not ingress:
-                continue
+                service_port=port_entry
+                node_port=""
+                protocol="TCP"
 
-            # User asked for services with LoadBalancer external IP.
-            external_ip = ingress[0].get("ip", "") or ""
-            if not external_ip:
-                continue
+                sub(/\/TCP$/, "", service_port)
 
-            namespace = svc.get("metadata", {}).get("namespace", "")
-            name = svc.get("metadata", {}).get("name", "")
+                if (service_port ~ /:/) {
+                  split(service_port, p, ":")
+                  service_port=p[1]
+                  node_port=p[2]
+                }
 
-            for port in spec.get("ports", []):
-                protocol = str(port.get("protocol", "TCP")).upper()
-                if protocol != "TCP":
-                    continue
-
-                service_port = str(port.get("port", ""))
-                target_port = str(port.get("targetPort", ""))
-                node_port = str(port.get("nodePort", ""))
-
-                if not service_port:
-                    continue
-
-                print("|".join([
-                    cluster,
-                    namespace,
-                    name,
-                    external_ip,
-                    service_port,
-                    target_port,
-                    node_port,
-                    protocol,
-                ]))
-        '
+                print cluster "|" namespace "|" service "|" external_ip "|" service_port "|" service_port "|" node_port "|" protocol
+              }
+            }
+          '
       args:
         executable: /bin/bash
       become_user: "{{ vind_user }}"
@@ -160,6 +145,15 @@
       register: lb_query_results
       changed_when: false
       failed_when: false
+      
+    - name: Show per-cluster LoadBalancer query results
+      ansible.builtin.debug:
+        msg:
+          cluster: "{{ item.item }}"
+          rc: "{{ item.rc }}"
+          stdout_lines: "{{ item.stdout_lines | default([]) }}"
+          stderr_lines: "{{ item.stderr_lines | default([]) }}"
+      loop: "{{ lb_query_results.results | default([]) }}"
 
     - name: Build raw LoadBalancer mapping list
       ansible.builtin.set_fact:
@@ -173,6 +167,10 @@
             | select('length')
             | list
           }}
+
+    - name: Show raw LoadBalancer mappings found
+      ansible.builtin.debug:
+        var: lb_mappings_raw
 
     - name: Generate stable random host ports for LoadBalancer mappings
       ansible.builtin.shell: |
