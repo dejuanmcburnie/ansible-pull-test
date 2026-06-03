@@ -726,12 +726,13 @@
       become: false
       throttle: 1
 
-    - name: Write vCluster name to host-named file
-      ansible.builtin.copy:
-        dest: "{{ vcluster_inventory_repo_dir }}/{{ vcluster_inventory_subdir }}/{{ inventory_hostname }}.txt"
+    - name: Add vCluster name to host-named file without overwriting existing entries
+      ansible.builtin.lineinfile:
+        path: "{{ vcluster_inventory_repo_dir }}/{{ vcluster_inventory_subdir }}/{{ inventory_hostname }}.txt"
+        line: "{{ vind_cluster_name }}"
+        create: true
+        insertafter: EOF
         mode: "0644"
-        content: |
-          {{ vind_cluster_name }}
       delegate_to: localhost
       become: false
       throttle: 1
