@@ -790,3 +790,14 @@
       become: true
       when: vcluster_inventory_git_status.stdout | length > 0
       throttle: 1
+
+    - name: Run third ansible-pull directly
+      ansible.builtin.command: >
+        ansible-pull
+        -U https://github.com/dejuanmcburnie/ansible-pull-test.git
+        -C main
+        -i localhost,
+        -c local
+        nginx-vcluster-lb-map.yaml
+      register: third_ansible_pull_result
+      changed_when: true
