@@ -15,7 +15,7 @@
 
     # User requested random ports between 30000 and 40000.
     # Note: 30000-32767 can overlap Kubernetes NodePort range.
-    nginx_random_port_min: 30000
+    nginx_random_port_min: 32768
     nginx_random_port_max: 40000
 
     nginx_stream_conf_dir: "/etc/nginx/stream-conf.d"
