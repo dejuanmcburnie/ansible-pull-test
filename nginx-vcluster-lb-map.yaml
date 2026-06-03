@@ -164,7 +164,7 @@
             | map(attribute='stdout_lines')
             | list
             | flatten
-            | select('length')
+            | reject('equalto', '')
             | list
           }}
 
