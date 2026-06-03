@@ -362,15 +362,15 @@
         state: stopped
       failed_when: false
 
-    - name: Confirm requested runtime disk exists
-      ansible.builtin.stat:
-        path: "{{ vind_runtime_disk }}"
-      register: vind_runtime_disk_stat
+    # - name: Confirm requested runtime disk exists
+    #   ansible.builtin.stat:
+    #     path: "{{ vind_runtime_disk }}"
+    #   register: vind_runtime_disk_stat
 
-    - name: Fail if runtime disk does not exist
-      ansible.builtin.fail:
-        msg: "Runtime disk {{ vind_runtime_disk }} does not exist. Check lsblk before continuing."
-      when: not vind_runtime_disk_stat.stat.exists
+    # - name: Fail if runtime disk does not exist
+    #   ansible.builtin.fail:
+    #     msg: "Runtime disk {{ vind_runtime_disk }} does not exist. Check lsblk before continuing."
+    #   when: not vind_runtime_disk_stat.stat.exists
 
     # - name: Safety check runtime disk is not loop or root device
     #   ansible.builtin.assert:
