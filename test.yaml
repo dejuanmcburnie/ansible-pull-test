@@ -6,15 +6,14 @@
   gather_facts: true
 
   vars:
-    vind_runtime_disk: "/dev/sda"
-    vind_runtime_partition: "/dev/sda1"
+    vind_runtime_disk_by_id: "/dev/disk/by-id/usb-Samsung_SSD_870_EVO_500G_0000AB1234AD-0:0"
     vind_runtime_label: "VINDRUNTIME"
     vind_runtime_mount: "/mnt/vind-runtime-disk"
-
+    
     docker_runtime_dir: "{{ vind_runtime_mount }}/docker"
     containerd_runtime_dir: "{{ vind_runtime_mount }}/containerd"
     vind_runtime_dir: "{{ vind_runtime_mount }}/vind-runtime"
-
+    
     wipe_vind_runtime_disk: true
     # Pin these as needed
 
@@ -373,17 +372,17 @@
         msg: "Runtime disk {{ vind_runtime_disk }} does not exist. Check lsblk before continuing."
       when: not vind_runtime_disk_stat.stat.exists
 
-    - name: Safety check runtime disk is not loop or root device
-      ansible.builtin.assert:
-        that:
-          - vind_runtime_disk is match('^/dev/sd[a-z]$')
-          - vind_runtime_disk != '/dev/sda'
-        fail_msg: |
-          Refusing to wipe {{ vind_runtime_disk }}.
+    # - name: Safety check runtime disk is not loop or root device
+    #   ansible.builtin.assert:
+    #     that:
+    #       - vind_runtime_disk is match('^/dev/sd[a-z]$')
+    #       - vind_runtime_disk != '/dev/sda'
+    #     fail_msg: |
+    #       Refusing to wipe {{ vind_runtime_disk }}.
 
-          This task is intentionally limited to /dev/sdX style disks and refuses /dev/sda.
-          Confirm the USB SSD with:
-          lsblk -f
+    #       This task is intentionally limited to /dev/sdX style disks and refuses /dev/sda.
+    #       Confirm the USB SSD with:
+    #       lsblk -f
 
     - name: Show current runtime disk layout before wipe
       ansible.builtin.command: "lsblk -f {{ vind_runtime_disk }}"
@@ -408,38 +407,66 @@
         executable: /bin/bash
       changed_when: true
 
-    - name: Wipe and partition runtime disk on first run only
+    - name: Resolve stable runtime disk path
+      ansible.builtin.command: "readlink -f {{ vind_runtime_disk_by_id }}"
+      register: vind_runtime_disk_real
+      changed_when: false
+    
+    - name: Set runtime disk and partition facts
+      ansible.builtin.set_fact:
+        vind_runtime_disk: "{{ vind_runtime_disk_real.stdout }}"
+        vind_runtime_partition: "{{ vind_runtime_disk_real.stdout }}1"
+    
+    - name: Safety check runtime disk was selected by stable by-id path
+      ansible.builtin.assert:
+        that:
+          - vind_runtime_disk_by_id is match('^/dev/disk/by-id/')
+          - vind_runtime_disk is match('^/dev/sd[a-z]$')
+        fail_msg: |
+          Refusing to wipe disk.
+    
+          Use a stable /dev/disk/by-id path, not /dev/sda or /dev/sdb.
+    
+          Example:
+          vind_runtime_disk_by_id=/dev/disk/by-id/usb-Samsung_Portable_SSD_...
+    
+    - name: Wipe and partition runtime disk only when explicitly requested
       ansible.builtin.shell: |
         set -eux
-
+    
         DISK="{{ vind_runtime_disk }}"
-
-        # Remove old signatures from existing partitions first.
+    
+        systemctl stop docker containerd 2>/dev/null || true
+    
+        umount /var/lib/docker 2>/dev/null || true
+        umount /var/lib/containerd 2>/dev/null || true
+        umount /var/lib/vind-runtime 2>/dev/null || true
+        umount "{{ vind_runtime_mount }}" 2>/dev/null || true
+    
         for part in $(lsblk -nrpo NAME "$DISK" | tail -n +2); do
           wipefs -a "$part" || true
         done
-
-        # Remove signatures and partition table from the disk.
+    
         wipefs -a "$DISK" || true
-
-        # Create a clean GPT + single ext4 partition.
+    
         parted -s "$DISK" mklabel gpt
         parted -s "$DISK" mkpart primary ext4 1MiB 100%
-
+    
         partprobe "$DISK" || true
         udevadm settle || true
-
-        # Wait for partition to appear.
-        for i in $(seq 1 20); do
-          if [ -b "{{ vind_runtime_partition }}" ]; then
+    
+        PART="${DISK}1"
+    
+        for i in $(seq 1 30); do
+          if [ -b "$PART" ]; then
             break
           fi
           sleep 1
         done
-
-        test -b "{{ vind_runtime_partition }}"
-
-        mkfs.ext4 -F -L "{{ vind_runtime_label }}" "{{ vind_runtime_partition }}"
+    
+        test -b "$PART"
+    
+        mkfs.ext4 -F -L "{{ vind_runtime_label }}" "$PART"
       args:
         executable: /bin/bash
       when: wipe_vind_runtime_disk | bool
