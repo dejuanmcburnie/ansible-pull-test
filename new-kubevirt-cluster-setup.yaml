@@ -562,10 +562,19 @@
       ansible.builtin.debug:
         var: vm_https_check_result.stdout_lines
 
-    - name: Show Debian 13 VM, VMI, and LoadBalancer service
+    - name: Show Debian 13 VM, VMI, pods, and LoadBalancer services
       ansible.builtin.shell: |
         set -eux
-        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} get vm,vmi,pod,svc {{ test_service_name }} -o wide'
+
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} get vm {{ kubevirt_vm_name }} -o wide'
+
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} get vmi {{ kubevirt_vm_name }} -o wide'
+
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} get pods -l app={{ kubevirt_vm_name }} -o wide'
+
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} get svc {{ test_service_name }} -o wide'
+
+        sg docker -c 'vcluster connect {{ vind_cluster_name }} --driver docker -- kubectl -n {{ test_namespace }} get svc {{ kubevirt_vm_name }}-ssh -o wide' || true
       args:
         executable: /bin/bash
       become_user: "{{ vind_user }}"
@@ -574,6 +583,10 @@
         KUBECONFIG: "{{ vind_kubeconfig }}"
       register: vm_lb_result
       changed_when: false
+
+    - name: Print Debian 13 VM and LoadBalancer service
+      ansible.builtin.debug:
+        var: vm_lb_result.stdout_lines
 
     - name: Print Debian 13 VM and LoadBalancer service
       ansible.builtin.debug:
