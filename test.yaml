@@ -384,15 +384,15 @@
     #       Confirm the USB SSD with:
     #       lsblk -f
 
-    - name: Show current runtime disk layout before wipe
-      ansible.builtin.command: "lsblk -f {{ vind_runtime_disk }}"
-      register: runtime_disk_before
-      changed_when: false
-      failed_when: false
+    # - name: Show current runtime disk layout before wipe
+    #   ansible.builtin.command: "lsblk -f {{ vind_runtime_disk }}"
+    #   register: runtime_disk_before
+    #   changed_when: false
+    #   failed_when: false
 
-    - name: Print current runtime disk layout before wipe
-      ansible.builtin.debug:
-        var: runtime_disk_before.stdout_lines
+    # - name: Print current runtime disk layout before wipe
+    #   ansible.builtin.debug:
+    #     var: runtime_disk_before.stdout_lines
 
     - name: Unmount old runtime bind mounts
       ansible.builtin.shell: |
