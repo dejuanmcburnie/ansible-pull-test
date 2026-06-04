@@ -25,6 +25,17 @@
     nginx_vcluster_index_file: "{{ nginx_vcluster_index_dir }}/index.html"
     nginx_vcluster_mapping_json: "{{ nginx_vcluster_index_dir }}/mappings.json"
 
+    client_services_repo_url: "git@github.com:dejuanmcburnie/ansible-pull-test.git"
+    client_services_repo_branch: "main"
+    client_services_repo_dir: "/opt/client-services-repo"
+    client_services_subdir: "client-services"
+
+    github_ssh_key_path: "/root/.ssh/github_vcluster_inventory"
+    mappings_json_path: "/var/www/vcluster-loadbalancers/mappings.json"
+
+    git_commit_name: "Services Mapper"
+    git_commit_email: "dejuan.mcburnie@payscale.com"
+
   tasks:
     - name: Install required packages
       ansible.builtin.apt:
@@ -271,6 +282,132 @@
         group: www-data
         mode: "0644"
         content: "{{ lb_mappings | to_nice_json }}"
+
+    - name: Clone or update client services repo
+      ansible.builtin.git:
+        repo: "{{ client_services_repo_url }}"
+        dest: "{{ client_services_repo_dir }}"
+        version: "{{ client_services_repo_branch }}"
+        update: true
+        accept_hostkey: true
+        key_file: "{{ github_ssh_key_path }}"
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ github_ssh_key_path }} -o IdentitiesOnly=yes"
+      become: true
+
+    - name: Ensure client-services directory exists
+      ansible.builtin.file:
+        path: "{{ client_services_repo_dir }}/{{ client_services_subdir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+
+    - name: Split mappings.json into one file per vCluster
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        SRC="{{ mappings_json_path }}"
+        OUTDIR="{{ client_services_repo_dir }}/{{ client_services_subdir }}"
+
+        python3 <<'PY'
+        import json
+        import os
+        import re
+        from datetime import datetime, timezone
+
+        src = "{{ mappings_json_path }}"
+        outdir = "{{ client_services_repo_dir }}/{{ client_services_subdir }}"
+
+        with open(src, "r", encoding="utf-8") as f:
+            mappings = json.load(f)
+
+        grouped = {}
+        for item in mappings:
+            cluster = item.get("cluster", "")
+            if not cluster:
+                continue
+            grouped.setdefault(cluster, []).append(item)
+
+        os.makedirs(outdir, exist_ok=True)
+
+        # Remove old generated JSON files so deleted clusters disappear from Git.
+        for name in os.listdir(outdir):
+            if name.endswith(".json"):
+                os.remove(os.path.join(outdir, name))
+
+        generated_at = datetime.now(timezone.utc).isoformat()
+
+        for cluster, services in sorted(grouped.items()):
+            safe_cluster = re.sub(r"[^a-zA-Z0-9_.-]", "-", cluster)
+
+            payload = {
+                "cluster": cluster,
+                "generated_at_utc": generated_at,
+                "services": services,
+            }
+
+            path = os.path.join(outdir, f"{safe_cluster}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+                f.write("\n")
+        PY
+      args:
+        executable: /bin/bash
+      become: true
+      register: split_client_services_result
+      changed_when: true
+
+    - name: Show generated client service files
+      ansible.builtin.shell: |
+        set -eux
+        find "{{ client_services_repo_dir }}/{{ client_services_subdir }}" -maxdepth 1 -type f -name '*.json' -print -exec cat {} \;
+      args:
+        executable: /bin/bash
+      register: generated_client_services
+      changed_when: false
+      become: true
+
+    - name: Print generated client service files
+      ansible.builtin.debug:
+        var: generated_client_services.stdout_lines
+
+    - name: Configure Git identity
+      ansible.builtin.shell: |
+        set -eux
+        git config user.name "{{ git_commit_name }}"
+        git config user.email "{{ git_commit_email }}"
+      args:
+        executable: /bin/bash
+        chdir: "{{ client_services_repo_dir }}"
+      become: true
+
+    - name: Commit and push client service mappings
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        git add "{{ client_services_subdir }}"
+
+        if git diff --cached --quiet; then
+          echo "No client service mapping changes to commit."
+          exit 0
+        fi
+
+        git commit -m "Update vCluster client service mappings"
+        git push origin "{{ client_services_repo_branch }}"
+      args:
+        executable: /bin/bash
+        chdir: "{{ client_services_repo_dir }}"
+      environment:
+        GIT_SSH_COMMAND: "ssh -i {{ github_ssh_key_path }} -o IdentitiesOnly=yes"
+      become: true
+      register: client_services_git_push
+      changed_when: "'No client service mapping changes' not in client_services_git_push.stdout"
+
+    - name: Show client services Git push result
+      ansible.builtin.debug:
+        var: client_services_git_push.stdout_lines
 
     - name: Write Nginx stream proxy config for vCluster LoadBalancer services
       ansible.builtin.copy:
