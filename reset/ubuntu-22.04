@@ -1,0 +1,197 @@
+---
+- name: Factory-like reset Ubuntu 22.04
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    confirm_factory_reset: false
+
+    # Keep one admin user so you do not lock yourself out.
+    # Override with:
+    # --extra-vars "preserve_user=techadmin"
+    preserve_user: ubuntu
+
+    remove_extra_users: true
+    reset_ssh_host_keys: true
+    clean_cloud_init: true
+    clean_logs: true
+    clean_tmp: true
+    clean_apt_cache: true
+    reset_machine_id: true
+
+    # Optional: wipe non-root block devices.
+    # Dangerous. Leave false unless you know what you are doing.
+    wipe_non_root_disks: false
+
+  pre_tasks:
+    - name: Require explicit confirmation
+      ansible.builtin.assert:
+        that:
+          - confirm_factory_reset | bool
+        fail_msg: >
+          Refusing to run. Re-run with:
+          --extra-vars "confirm_factory_reset=true"
+
+    - name: Confirm Ubuntu 22.04
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version is version("22.04", ">=")
+          - ansible_distribution_version is version("22.10", "<")
+        fail_msg: "This playbook is intended for Ubuntu 22.04 only."
+
+  tasks:
+    - name: Find normal local users
+      ansible.builtin.shell: |
+        awk -F: '$3 >= 1000 && $3 < 60000 { print $1 }' /etc/passwd
+      register: local_users
+      changed_when: false
+      when: remove_extra_users | bool
+
+    - name: Remove non-preserved local users
+      ansible.builtin.user:
+        name: "{{ item }}"
+        state: absent
+        remove: true
+      loop: "{{ local_users.stdout_lines }}"
+      when:
+        - remove_extra_users | bool
+        - item != preserve_user
+        - item != "nobody"
+
+    - name: Remove leftover home directories except preserved user
+      ansible.builtin.shell: |
+        for d in /home/*; do
+          [ -d "$d" ] || continue
+          u="$(basename "$d")"
+          if [ "$u" != "{{ preserve_user }}" ]; then
+            rm -rf "$d"
+          fi
+        done
+      changed_when: true
+      when: remove_extra_users | bool
+
+    - name: Clear preserved user's shell history
+      ansible.builtin.shell: |
+        rm -f /home/{{ preserve_user }}/.bash_history
+        rm -f /root/.bash_history
+        history -c || true
+      changed_when: true
+      failed_when: false
+
+    - name: Remove SSH host keys
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/ssh/ssh_host_rsa_key
+        - /etc/ssh/ssh_host_rsa_key.pub
+        - /etc/ssh/ssh_host_ecdsa_key
+        - /etc/ssh/ssh_host_ecdsa_key.pub
+        - /etc/ssh/ssh_host_ed25519_key
+        - /etc/ssh/ssh_host_ed25519_key.pub
+      when: reset_ssh_host_keys | bool
+
+    - name: Regenerate SSH host keys
+      ansible.builtin.command: dpkg-reconfigure openssh-server
+      when: reset_ssh_host_keys | bool
+
+    - name: Stop rsyslog before log cleanup
+      ansible.builtin.service:
+        name: rsyslog
+        state: stopped
+      failed_when: false
+      when: clean_logs | bool
+
+    - name: Clean logs
+      ansible.builtin.shell: |
+        journalctl --rotate || true
+        journalctl --vacuum-time=1s || true
+        find /var/log -type f -exec truncate -s 0 {} \;
+        rm -rf /var/log/journal/*
+      changed_when: true
+      when: clean_logs | bool
+
+    - name: Start rsyslog after log cleanup
+      ansible.builtin.service:
+        name: rsyslog
+        state: started
+      failed_when: false
+      when: clean_logs | bool
+
+    - name: Clean temporary files
+      ansible.builtin.shell: |
+        rm -rf /tmp/*
+        rm -rf /var/tmp/*
+      changed_when: true
+      when: clean_tmp | bool
+
+    - name: Clean apt cache
+      ansible.builtin.apt:
+        autoclean: true
+        autoremove: true
+      when: clean_apt_cache | bool
+
+    - name: Remove apt lists
+      ansible.builtin.shell: |
+        rm -rf /var/lib/apt/lists/*
+      changed_when: true
+      when: clean_apt_cache | bool
+
+    - name: Clean cloud-init state
+      ansible.builtin.command: cloud-init clean --logs --seed
+      failed_when: false
+      changed_when: true
+      when: clean_cloud_init | bool
+
+    - name: Reset machine-id
+      ansible.builtin.shell: |
+        truncate -s 0 /etc/machine-id
+        rm -f /var/lib/dbus/machine-id
+        ln -sf /etc/machine-id /var/lib/dbus/machine-id
+      changed_when: true
+      when: reset_machine_id | bool
+
+    - name: Identify root disk
+      ansible.builtin.shell: |
+        root_src="$(findmnt -n -o SOURCE /)"
+        lsblk -no PKNAME "$root_src" 2>/dev/null | head -n1
+      register: root_disk_name
+      changed_when: false
+      when: wipe_non_root_disks | bool
+
+    - name: List non-root disks
+      ansible.builtin.shell: |
+        root_disk="{{ root_disk_name.stdout }}"
+        lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}' | while read disk; do
+          if [ "$disk" != "$root_disk" ]; then
+            echo "/dev/$disk"
+          fi
+        done
+      register: non_root_disks
+      changed_when: false
+      when: wipe_non_root_disks | bool
+
+    - name: Wipe non-root disks
+      ansible.builtin.shell: |
+        set -e
+        disk="{{ item }}"
+        swapoff -a || true
+        wipefs -a "$disk"
+        blkdiscard "$disk" || dd if=/dev/zero of="$disk" bs=10M count=100 oflag=direct
+      loop: "{{ non_root_disks.stdout_lines | default([]) }}"
+      changed_when: true
+      when: wipe_non_root_disks | bool
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: >
+          Factory-like reset completed. Reboot recommended.
+          If cloud-init is enabled, first boot after reboot should regenerate instance identity.
+
+    - name: Reboot system
+      ansible.builtin.reboot:
+        msg: "Rebooting after factory-like reset"
+        reboot_timeout: 600
