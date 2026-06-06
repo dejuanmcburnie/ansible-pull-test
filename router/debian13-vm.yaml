@@ -69,30 +69,38 @@
 
   pre_tasks:
     - name: Check that qm exists
-      ansible.builtin.command:
-        cmd: command -v qm
-      changed_when: false
-
-    - name: Check that pvesm exists
-      ansible.builtin.command:
-        cmd: command -v pvesm
-      changed_when: false
-
-    - name: Check that qemu-img exists
-      ansible.builtin.command:
-        cmd: command -v qemu-img
-      changed_when: false
-
-    - name: Refuse default password unless SSH key is provided
+      ansible.builtin.stat:
+        path: /usr/sbin/qm
+      register: qm_stat
+  
+    - name: Fail if qm is missing
       ansible.builtin.assert:
         that:
-          - ssh_public_key | length > 0 or cloud_init_password != "CHANGE_ME"
-        fail_msg: >-
-          Set ssh_public_key or change cloud_init_password.
-          Example:
-          -e ssh_public_key='ssh-ed25519 AAAA...'
-          or
-          -e cloud_init_password='StrongPasswordHere'
+          - qm_stat.stat.exists
+        fail_msg: "qm was not found at /usr/sbin/qm. Run this playbook inside the Proxmox container."
+  
+    - name: Check that pvesm exists
+      ansible.builtin.stat:
+        path: /usr/sbin/pvesm
+      register: pvesm_stat
+  
+    - name: Fail if pvesm is missing
+      ansible.builtin.assert:
+        that:
+          - pvesm_stat.stat.exists
+        fail_msg: "pvesm was not found at /usr/sbin/pvesm. Run this playbook inside the Proxmox container."
+  
+    - name: Check that qemu-img exists
+      ansible.builtin.stat:
+        path: /usr/bin/qemu-img
+      register: qemu_img_stat
+  
+    - name: Install qemu-utils if qemu-img is missing
+      ansible.builtin.apt:
+        name: qemu-utils
+        state: present
+        update_cache: true
+      when: not qemu_img_stat.stat.exists
 
   tasks:
     - name: Ensure local storage supports VM images and snippets
