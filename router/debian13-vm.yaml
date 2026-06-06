@@ -1,0 +1,376 @@
+---
+- name: Create Debian 13 cloud-init VM on Proxmox
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+
+  vars:
+    # -----------------------------
+    # VM settings
+    # -----------------------------
+    vmid: 130
+    vm_name: debian13
+    vm_description: "Debian 13 Trixie cloud-init VM created by ansible-pull"
+
+    vm_cores: 2
+    vm_memory_mb: 2048
+    vm_balloon_mb: 1024
+    vm_disk_size: 20G
+
+    # This playbook assumes containerized Proxmox local dir storage.
+    vm_storage: local
+    cloudinit_storage: local
+
+    # Bridge must exist where QEMU runs.
+    # In containerized Proxmox this bridge exists inside pve-1 unless using host networking.
+    vm_bridge: vmbr2
+    create_bridge_if_missing: true
+
+    # DHCP:
+    # vm_ipconfig0: "ip=dhcp"
+
+    # Static example:
+    vm_ipconfig0: "ip=10.50.50.20/24,gw=10.50.50.1"
+
+    vm_nameserver: "1.1.1.1"
+    vm_searchdomain: "local"
+
+    # -----------------------------
+    # Cloud-init login
+    # -----------------------------
+    cloud_init_user: debian
+
+    # Recommended: use SSH key.
+    # Example:
+    # ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI..."
+    ssh_public_key: ""
+
+    # Optional password login.
+    # If you use this, change it.
+    cloud_init_password: "CHANGE_ME"
+
+    allow_ssh_password_auth: true
+
+    # -----------------------------
+    # Debian 13 image
+    # -----------------------------
+    debian_cloud_image_url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+    image_cache_dir: /var/lib/vz/template/qcow2
+    debian_cloud_image_path: /var/lib/vz/template/qcow2/debian-13-genericcloud-amd64.qcow2
+
+    # -----------------------------
+    # Behavior
+    # -----------------------------
+    start_vm_after_create: true
+
+    # Set true to destroy/recreate the VM if it already exists.
+    recreate_vm: false
+
+  pre_tasks:
+    - name: Check that qm exists
+      ansible.builtin.command:
+        cmd: command -v qm
+      changed_when: false
+
+    - name: Check that pvesm exists
+      ansible.builtin.command:
+        cmd: command -v pvesm
+      changed_when: false
+
+    - name: Check that qemu-img exists
+      ansible.builtin.command:
+        cmd: command -v qemu-img
+      changed_when: false
+
+    - name: Refuse default password unless SSH key is provided
+      ansible.builtin.assert:
+        that:
+          - ssh_public_key | length > 0 or cloud_init_password != "CHANGE_ME"
+        fail_msg: >-
+          Set ssh_public_key or change cloud_init_password.
+          Example:
+          -e ssh_public_key='ssh-ed25519 AAAA...'
+          or
+          -e cloud_init_password='StrongPasswordHere'
+
+  tasks:
+    - name: Ensure local storage supports VM images and snippets
+      ansible.builtin.command:
+        cmd: pvesm set local --content iso,vztmpl,backup,images,rootdir,snippets
+      changed_when: false
+      when: vm_storage == "local" or cloudinit_storage == "local"
+
+    - name: Create required local directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ image_cache_dir }}"
+        - /var/lib/vz/snippets
+        - "/var/lib/vz/images/{{ vmid }}"
+
+    - name: Check whether VM already exists
+      ansible.builtin.command:
+        cmd: "qm status {{ vmid }}"
+      register: vm_exists_check
+      changed_when: false
+      failed_when: false
+
+    - name: Stop existing VM when recreate_vm is true
+      ansible.builtin.command:
+        cmd: "qm stop {{ vmid }}"
+      failed_when: false
+      changed_when: true
+      when:
+        - recreate_vm | bool
+        - vm_exists_check.rc == 0
+
+    - name: Destroy existing VM when recreate_vm is true
+      ansible.builtin.command:
+        cmd: "qm destroy {{ vmid }} --purge"
+      failed_when: false
+      changed_when: true
+      when:
+        - recreate_vm | bool
+        - vm_exists_check.rc == 0
+
+    - name: Refresh VM existence after optional destroy
+      ansible.builtin.command:
+        cmd: "qm status {{ vmid }}"
+      register: vm_exists_after_destroy
+      changed_when: false
+      failed_when: false
+
+    - name: Check whether VM bridge exists
+      ansible.builtin.command:
+        cmd: "ip link show {{ vm_bridge }}"
+      register: bridge_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create bridge live if missing
+      ansible.builtin.shell: |
+        set -e
+        ip link add name {{ vm_bridge }} type bridge || true
+        ip link set {{ vm_bridge }} up
+      args:
+        executable: /bin/bash
+      changed_when: bridge_check.rc != 0
+      when:
+        - create_bridge_if_missing | bool
+        - bridge_check.rc != 0
+
+    - name: Add bridge to /etc/network/interfaces if missing
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        create: true
+        marker: "# {mark} ANSIBLE {{ vm_bridge }}"
+        block: |
+          auto {{ vm_bridge }}
+          iface {{ vm_bridge }} inet manual
+                  bridge-ports none
+                  bridge-stp off
+                  bridge-fd 0
+                  bridge-vlan-aware yes
+                  bridge-vids 2-4094
+      when: create_bridge_if_missing | bool
+
+    - name: Fail if bridge still does not exist
+      ansible.builtin.command:
+        cmd: "ip link show {{ vm_bridge }}"
+      changed_when: false
+
+    - name: Download Debian 13 cloud image
+      ansible.builtin.get_url:
+        url: "{{ debian_cloud_image_url }}"
+        dest: "{{ debian_cloud_image_path }}"
+        mode: "0644"
+        force: false
+
+    - name: Write SSH public key file for qm cloud-init
+      ansible.builtin.copy:
+        dest: "/tmp/{{ vm_name }}-{{ vmid }}-sshkey.pub"
+        content: "{{ ssh_public_key }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      when: ssh_public_key | length > 0
+
+    - name: Write custom cloud-init user-data
+      ansible.builtin.copy:
+        dest: "/var/lib/vz/snippets/{{ vm_name }}-{{ vmid }}-user-data.yml"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          #cloud-config
+          hostname: {{ vm_name }}
+          manage_etc_hosts: true
+
+          users:
+            - default
+            - name: {{ cloud_init_user }}
+              groups:
+                - sudo
+                - adm
+              shell: /bin/bash
+              sudo:
+                - "ALL=(ALL) NOPASSWD:ALL"
+          {% if ssh_public_key | length > 0 %}
+              ssh_authorized_keys:
+                - {{ ssh_public_key }}
+          {% endif %}
+          {% if cloud_init_password | length > 0 and cloud_init_password != "CHANGE_ME" %}
+              lock_passwd: false
+          {% else %}
+              lock_passwd: true
+          {% endif %}
+
+          ssh_pwauth: {{ 'true' if allow_ssh_password_auth | bool else 'false' }}
+
+          {% if cloud_init_password | length > 0 and cloud_init_password != "CHANGE_ME" %}
+          chpasswd:
+            expire: false
+            list: |
+              {{ cloud_init_user }}:{{ cloud_init_password }}
+          {% endif %}
+
+          package_update: true
+          packages:
+            - qemu-guest-agent
+            - curl
+            - ca-certificates
+            - sudo
+            - vim
+            - net-tools
+            - dnsutils
+            - cloud-guest-utils
+
+          runcmd:
+            - systemctl enable --now qemu-guest-agent || true
+      no_log: true
+
+    - name: Copy Debian cloud image to VM disk path
+      ansible.builtin.copy:
+        src: "{{ debian_cloud_image_path }}"
+        dest: "/var/lib/vz/images/{{ vmid }}/vm-{{ vmid }}-disk-0.qcow2"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Resize Debian VM disk
+      ansible.builtin.command:
+        cmd: "qemu-img resize /var/lib/vz/images/{{ vmid }}/vm-{{ vmid }}-disk-0.qcow2 {{ vm_disk_size }}"
+      changed_when: true
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Create Debian 13 VM
+      ansible.builtin.command:
+        cmd: >-
+          qm create {{ vmid }}
+          --name {{ vm_name }}
+          --description {{ vm_description | quote }}
+          --memory {{ vm_memory_mb }}
+          --balloon {{ vm_balloon_mb }}
+          --cores {{ vm_cores }}
+          --cpu host
+          --machine q35
+          --ostype l26
+          --scsihw virtio-scsi-single
+          --net0 virtio,bridge={{ vm_bridge }}
+          --agent enabled=1,fstrim_cloned_disks=1
+          --serial0 socket
+          --vga serial0
+          --tablet 0
+      changed_when: true
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Attach Debian cloud image disk
+      ansible.builtin.command:
+        cmd: >-
+          qm set {{ vmid }}
+          --scsi0 {{ vm_storage }}:{{ vmid }}/vm-{{ vmid }}-disk-0.qcow2,discard=on,iothread=1
+      changed_when: true
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Attach cloud-init drive
+      ansible.builtin.command:
+        cmd: "qm set {{ vmid }} --ide2 {{ cloudinit_storage }}:cloudinit"
+      changed_when: true
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Configure boot order
+      ansible.builtin.command:
+        cmd: "qm set {{ vmid }} --boot order=scsi0"
+      changed_when: true
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Configure cloud-init networking
+      ansible.builtin.command:
+        cmd: >-
+          qm set {{ vmid }}
+          --ipconfig0 {{ vm_ipconfig0 | quote }}
+          --nameserver {{ vm_nameserver | quote }}
+          --searchdomain {{ vm_searchdomain | quote }}
+      changed_when: true
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Configure cloud-init user-data snippet
+      ansible.builtin.command:
+        cmd: >-
+          qm set {{ vmid }}
+          --cicustom user={{ cloudinit_storage }}:snippets/{{ vm_name }}-{{ vmid }}-user-data.yml
+      changed_when: true
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Set SSH public key with qm if provided
+      ansible.builtin.command:
+        cmd: "qm set {{ vmid }} --sshkeys /tmp/{{ vm_name }}-{{ vmid }}-sshkey.pub"
+      changed_when: true
+      when:
+        - vm_exists_after_destroy.rc != 0
+        - ssh_public_key | length > 0
+
+    - name: Set cloud-init user
+      ansible.builtin.command:
+        cmd: "qm set {{ vmid }} --ciuser {{ cloud_init_user }}"
+      changed_when: true
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Regenerate cloud-init image
+      ansible.builtin.command:
+        cmd: "qm cloudinit update {{ vmid }}"
+      changed_when: true
+      when: vm_exists_after_destroy.rc != 0
+
+    - name: Start Debian VM
+      ansible.builtin.command:
+        cmd: "qm start {{ vmid }}"
+      changed_when: true
+      when:
+        - start_vm_after_create | bool
+        - vm_exists_after_destroy.rc != 0
+
+    - name: Show VM details
+      ansible.builtin.command:
+        cmd: "qm config {{ vmid }}"
+      register: qm_config
+      changed_when: false
+
+    - name: Print summary
+      ansible.builtin.debug:
+        msg:
+          - "VM {{ vmid }} / {{ vm_name }} is configured."
+          - "Bridge: {{ vm_bridge }}"
+          - "Network: {{ vm_ipconfig0 }}"
+          - "Storage: {{ vm_storage }}"
+          - "Disk: /var/lib/vz/images/{{ vmid }}/vm-{{ vmid }}-disk-0.qcow2"
+          - "Console: qm terminal {{ vmid }}"
+          - "Config:"
+          - "{{ qm_config.stdout_lines }}"
