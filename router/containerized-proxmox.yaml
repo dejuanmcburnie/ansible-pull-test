@@ -1,0 +1,202 @@
+---
+- name: Install Docker and deploy containerized Proxmox
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    pve_compose_dir: /opt/containerized-proxmox
+    proxmox_data_root: /srv/containerized-proxmox
+
+    pve_image: ghcr.io/longqt-sea/proxmox-ve:latest
+    pve_container_name: pve-1
+    pve_hostname: pve-1
+    pve_root_password: "CHANGE_ME"
+
+    pve_web_port: 8006
+    pve_ssh_port: 2222
+    pve_spice_port: 3128
+
+    require_kvm: true
+
+  pre_tasks:
+    - name: Fail if host is not Debian/Ubuntu family
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Debian"
+        fail_msg: "This playbook is written for Ubuntu/Debian-family hosts."
+
+    - name: Check for /dev/kvm
+      ansible.builtin.stat:
+        path: /dev/kvm
+      register: kvm_device
+
+    - name: Fail if /dev/kvm is missing
+      ansible.builtin.assert:
+        that:
+          - kvm_device.stat.exists
+        fail_msg: "/dev/kvm is missing. Enable Intel VT-x/AMD-V virtualization and KVM on the host."
+      when: require_kvm | bool
+
+    - name: Validate Proxmox root password override
+      ansible.builtin.assert:
+        that:
+          - pve_root_password != "CHANGE_ME"
+        fail_msg: "Set pve_root_password with -e pve_root_password='your-password' or an Ansible vars file."
+
+  tasks:
+    - name: Remove conflicting distro Docker packages
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose
+          - docker-compose-v2
+          - docker-doc
+          - podman-docker
+          - containerd
+          - runc
+        state: absent
+        purge: false
+      failed_when: false
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: true
+
+    - name: Create Docker apt keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker apt signing key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Set Docker apt architecture fact
+      ansible.builtin.set_fact:
+        docker_apt_arch: >-
+          {{
+            {
+              'x86_64': 'amd64',
+              'aarch64': 'arm64',
+              'armv7l': 'armhf'
+            }.get(ansible_architecture, ansible_architecture)
+          }}
+
+    - name: Add Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ docker_apt_arch }} signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }}
+          stable
+        filename: docker
+        state: present
+        update_cache: true
+
+    - name: Install Docker Engine and Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Create containerized Proxmox directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ pve_compose_dir }}"
+        - "{{ proxmox_data_root }}"
+        - "{{ proxmox_data_root }}/var-lib-vz"
+        - "{{ proxmox_data_root }}/var-lib-vz/dump"
+        - "{{ proxmox_data_root }}/var-lib-vz/images"
+        - "{{ proxmox_data_root }}/var-lib-vz/template"
+        - "{{ proxmox_data_root }}/var-lib-vz/template/iso"
+        - "{{ proxmox_data_root }}/var-lib-pve-cluster"
+        - "{{ proxmox_data_root }}/var-lib-pve-manager"
+        - "{{ proxmox_data_root }}/etc-network"
+
+    - name: Write Docker Compose file
+      ansible.builtin.copy:
+        dest: "{{ pve_compose_dir }}/compose.yml"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          services:
+            {{ pve_container_name }}:
+              image: {{ pve_image }}
+              container_name: {{ pve_container_name }}
+              hostname: {{ pve_hostname }}
+              restart: unless-stopped
+              stdin_open: true
+              tty: true
+              cgroup: private
+              privileged: true
+              device_cgroup_rules:
+                - "a *:* rwm"
+              cap_add:
+                - ALL
+              security_opt:
+                - seccomp=unconfined
+                - apparmor=unconfined
+                - systempaths=unconfined
+              environment:
+                PASSWORD: "{{ pve_root_password }}"
+              ports:
+                - "{{ pve_ssh_port }}:22"
+                - "{{ pve_spice_port }}:3128"
+                - "{{ pve_web_port }}:8006"
+              devices:
+                - /dev/kvm:/dev/kvm
+              volumes:
+                - /usr/lib/modules:/usr/lib/modules:ro
+                - /sys/kernel/security:/sys/kernel/security
+                - "{{ proxmox_data_root }}/var-lib-vz:/var/lib/vz"
+                - "{{ proxmox_data_root }}/var-lib-pve-cluster:/var/lib/pve-cluster"
+                - "{{ proxmox_data_root }}/var-lib-pve-manager:/var/lib/pve-manager"
+                - "{{ proxmox_data_root }}/etc-network:/etc/network"
+
+    - name: Pull containerized Proxmox image
+      ansible.builtin.command:
+        cmd: docker compose -f {{ pve_compose_dir }}/compose.yml pull
+      changed_when: true
+
+    - name: Start containerized Proxmox
+      ansible.builtin.command:
+        cmd: docker compose -f {{ pve_compose_dir }}/compose.yml up -d --remove-orphans
+      changed_when: true
+
+    - name: Show access details
+      ansible.builtin.debug:
+        msg:
+          - "Proxmox URL: https://{{ ansible_default_ipv4.address | default('HOST_IP') }}:{{ pve_web_port }}/"
+          - "Container name: {{ pve_container_name }}"
+          - "SSH port: {{ pve_ssh_port }}"
+          - "SPICE proxy port: {{ pve_spice_port }}"
+          - "Persistent data root: {{ proxmox_data_root }}"
+          - "Compose file: {{ pve_compose_dir }}/compose.yml"
