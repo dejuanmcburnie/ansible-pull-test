@@ -1,0 +1,115 @@
+- name: Setup PXE Boot Server
+  hosts: localhost
+  become: yes
+
+  vars:
+    tftp_root: /config/menus
+    http_root: /var/www/html
+    live_dir: "{{ http_root }}/live"
+    config_dir: "{{ http_root }}/configs"
+
+  tasks:
+
+    - name: Install required packages
+      apt:
+        name:
+          - dnsmasq
+          - python3
+          - python3-venv
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Create directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ tftp_root }}"
+        - "{{ http_root }}"
+        - "{{ live_dir }}"
+        - "{{ config_dir }}"
+
+    # -------------------------
+    # DNSMASQ CONFIG
+    # -------------------------
+    - name: Deploy dnsmasq PXE config
+      copy:
+        src: files/dnsmasq-pxe.conf
+        dest: /etc/dnsmasq.d/pxe.conf
+        mode: "0644"
+
+    - name: Enable TFTP in dnsmasq default config
+      lineinfile:
+        path: /etc/dnsmasq.conf
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - "port=0"
+        - "enable-tftp"
+        - "tftp-root={{ tftp_root }}"
+
+    - name: Restart dnsmasq
+      systemd:
+        name: dnsmasq
+        state: restarted
+        enabled: yes
+
+    # -------------------------
+    # IPXE FILES
+    # -------------------------
+    - name: Copy iPXE EFI binaries
+      copy:
+        src: "files/{{ item }}"
+        dest: "{{ tftp_root }}/{{ item }}"
+        mode: "0755"
+      loop:
+        - ipxe-nic1.efi
+        - ipxe-nic2.efi
+        - ipxe-default.efi
+
+    # -------------------------
+    # LIVE BOOT FILES
+    # -------------------------
+    - name: Copy kernel and initrd
+      copy:
+        src: "files/{{ item }}"
+        dest: "{{ live_dir }}/{{ item }}"
+      loop:
+        - vmlinuz
+        - initrd.img
+
+    - name: Copy squashfs images
+      copy:
+        src: "files/{{ item }}"
+        dest: "{{ live_dir }}/{{ item }}"
+      loop:
+        - filesystem-nic1.squashfs
+        - filesystem-nic2.squashfs
+
+    # -------------------------
+    # CONFIG SCRIPTS (PER MAC)
+    # -------------------------
+    - name: Copy config scripts
+      copy:
+        src: "files/configs/"
+        dest: "{{ config_dir }}/"
+        mode: "0755"
+
+    # -------------------------
+    # PYTHON HTTP SERVER
+    # -------------------------
+    - name: Create systemd service for HTTP server
+      template:
+        src: templates/pxe-http.service.j2
+        dest: /etc/systemd/system/pxe-http.service
+
+    - name: Reload systemd
+      command: systemctl daemon-reexec
+
+    - name: Enable HTTP server
+      systemd:
+        name: pxe-http
+        state: restarted
+        enabled: yes

@@ -1,0 +1,7 @@
+#!ipxe
+
+kernel http://192.168.68.60:8081/live/vmlinuz boot=live components \
+    fetch=http://192.168.68.60:8081/live/filesystem-nic1.squashfs
+
+initrd http://192.168.68.60:8081/live/initrd.img
+boot
