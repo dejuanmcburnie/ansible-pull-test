@@ -1,0 +1,19 @@
+#!ipxe
+
+echo Boot script loaded
+
+dhcp
+
+set mac ${net0/mac:hexhyp}
+
+echo MAC: ${mac}
+
+iseq ${mac} bc-24-11-bc-ce-73 && goto nic1
+
+goto default
+
+:nic1
+chain http://10.50.50.6:8081/configs/nic1.ipxe
+
+:default
+chain http://10.50.50.6:8081/configs/default.ipxe
