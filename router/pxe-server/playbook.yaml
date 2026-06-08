@@ -96,6 +96,11 @@
         src: "files/configs/"
         dest: "{{ config_dir }}/"
         mode: "0755"
+    - name: Deploy iPXE EFI
+      copy:
+        src: files/ipxe.efi
+        dest: /config/menus/ipxe.efi
+        mode: "0755"
 
     # -------------------------
     # PYTHON HTTP SERVER
