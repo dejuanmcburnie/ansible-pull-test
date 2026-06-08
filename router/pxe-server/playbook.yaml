@@ -99,7 +99,7 @@
         
     - name: Deploy iPXE EFI
       copy:
-        src: "files/configs/ipxe.kpxe2"
+        src: "files/configs/ipxe.kpxe"
         dest: "{{ config_dir }}/ipxe.kpxe"
         mode: "0755"
 
