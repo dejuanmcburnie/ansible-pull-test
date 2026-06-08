@@ -1,0 +1,11 @@
+#!ipxe
+
+echo === NIC1 BOOT ===
+
+kernel http://10.50.50.6:8081/live/vmlinuz boot=live components \
+    fetch=http://10.50.50.6:8081/live/filesystem-nic1.squashfs \
+    ip=dhcp
+
+initrd http://10.50.50.6:8081/live/initrd.img
+
+boot
