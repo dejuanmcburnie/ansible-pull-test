@@ -1,0 +1,178 @@
+---
+- name: Create or update local Proxmox VM backup schedule
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    # Change this to your actual Proxmox backup storage ID.
+    # Check with:
+    #   pvesm status
+    #
+    # Examples:
+    #   local
+    #   local-zfs
+    #   nfs-backup
+    #   pbs
+    #   pbs-backup
+    pve_backup_storage: "local"
+
+    # Run backup every hour.
+    pve_backup_schedule: "hourly"
+
+    # Keep only the latest 48 backups per VM/CT.
+    pve_backup_prune: "keep-last=48"
+
+    # Backup mode.
+    # snapshot is usually safest for running VMs.
+    pve_backup_mode: "snapshot"
+
+    # Compression type.
+    pve_backup_compress: "zstd"
+
+    # Set true if you want to back up LXC containers too.
+    pve_include_lxc: false
+
+    # Backup job ID prefix.
+    # Final job ID becomes:
+    #   ansible-local-backup-HOSTNAME
+    pve_backup_job_prefix: "ansible-local-backup"
+
+    # 1 = enabled, 0 = disabled.
+    pve_backup_enabled: 1
+
+    # Notes attached to the backup.
+    pve_notes_template: "{{ '{{guestname}}' }}"
+
+  tasks:
+    - name: Verify this is a Proxmox host with pvesh
+      ansible.builtin.command: test -x /usr/bin/pvesh
+      changed_when: false
+
+    - name: Get local Proxmox node name
+      ansible.builtin.command: hostname -s
+      register: pve_hostname
+      changed_when: false
+
+    - name: Set Proxmox node and backup job ID
+      ansible.builtin.set_fact:
+        pve_node: "{{ pve_hostname.stdout }}"
+        pve_backup_job_id: "{{ pve_backup_job_prefix }}-{{ pve_hostname.stdout }}"
+
+    - name: Verify backup storage exists in Proxmox
+      ansible.builtin.shell: |
+        set -euo pipefail
+        pvesm status | awk 'NR > 1 {print $1}' | grep -Fx '{{ pve_backup_storage }}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Discover QEMU VMs on local Proxmox node
+      ansible.builtin.command: >
+        pvesh get /nodes/{{ pve_node }}/qemu --output-format json
+      register: qemu_vms_raw
+      changed_when: false
+
+    - name: Discover LXC containers on local Proxmox node
+      ansible.builtin.command: >
+        pvesh get /nodes/{{ pve_node }}/lxc --output-format json
+      register: lxc_vms_raw
+      changed_when: false
+      when: pve_include_lxc | bool
+
+    - name: Build local QEMU VMID list
+      ansible.builtin.set_fact:
+        qemu_vmids: >-
+          {{
+            (qemu_vms_raw.stdout | from_json)
+            | map(attribute='vmid')
+            | map('string')
+            | list
+          }}
+
+    - name: Build local LXC VMID list
+      ansible.builtin.set_fact:
+        lxc_vmids: >-
+          {{
+            (
+              (lxc_vms_raw.stdout | default('[]')) | from_json
+            )
+            | map(attribute='vmid')
+            | map('string')
+            | list
+            if pve_include_lxc | bool
+            else []
+          }}
+
+    - name: Combine local VMID list
+      ansible.builtin.set_fact:
+        local_vmids: "{{ (qemu_vmids + lxc_vmids) | unique | sort }}"
+        local_vmids_csv: "{{ ((qemu_vmids + lxc_vmids) | unique | sort) | join(',') }}"
+
+    - name: Show discovered local VMIDs
+      ansible.builtin.debug:
+        msg:
+          - "Node: {{ pve_node }}"
+          - "QEMU VMIDs: {{ qemu_vmids | default([]) }}"
+          - "LXC VMIDs: {{ lxc_vmids | default([]) }}"
+          - "Combined VMIDs: {{ local_vmids | default([]) }}"
+
+    - name: Stop if no local VMs exist
+      ansible.builtin.debug:
+        msg: "No local VMs found on {{ pve_node }}. No Proxmox backup job will be created."
+      when: local_vmids | length == 0
+
+    - name: Check whether backup job already exists
+      ansible.builtin.command: >
+        pvesh get /cluster/backup/{{ pve_backup_job_id }} --output-format json
+      register: existing_backup_job
+      failed_when: false
+      changed_when: false
+      when: local_vmids | length > 0
+
+    - name: Create Proxmox backup job for local VMs
+      ansible.builtin.command: >
+        pvesh create /cluster/backup
+        --id {{ pve_backup_job_id }}
+        --node {{ pve_node }}
+        --vmid {{ local_vmids_csv }}
+        --storage {{ pve_backup_storage }}
+        --mode {{ pve_backup_mode }}
+        --compress {{ pve_backup_compress }}
+        --schedule "{{ pve_backup_schedule }}"
+        --prune-backups "{{ pve_backup_prune }}"
+        --enabled {{ pve_backup_enabled }}
+        --notes-template "{{ pve_notes_template }}"
+      when:
+        - local_vmids | length > 0
+        - existing_backup_job.rc != 0
+
+    - name: Update existing Proxmox backup job for local VMs
+      ansible.builtin.command: >
+        pvesh set /cluster/backup/{{ pve_backup_job_id }}
+        --node {{ pve_node }}
+        --vmid {{ local_vmids_csv }}
+        --storage {{ pve_backup_storage }}
+        --mode {{ pve_backup_mode }}
+        --compress {{ pve_backup_compress }}
+        --schedule "{{ pve_backup_schedule }}"
+        --prune-backups "{{ pve_backup_prune }}"
+        --enabled {{ pve_backup_enabled }}
+        --notes-template "{{ pve_notes_template }}"
+      when:
+        - local_vmids | length > 0
+        - existing_backup_job.rc == 0
+
+    - name: Show configured backup job summary
+      ansible.builtin.debug:
+        msg:
+          - "Backup job ID: {{ pve_backup_job_id }}"
+          - "Node: {{ pve_node }}"
+          - "VMIDs: {{ local_vmids_csv }}"
+          - "Storage: {{ pve_backup_storage }}"
+          - "Schedule: {{ pve_backup_schedule }}"
+          - "Retention: {{ pve_backup_prune }}"
+          - "Mode: {{ pve_backup_mode }}"
+          - "Compression: {{ pve_backup_compress }}"
+      when: local_vmids | length > 0
