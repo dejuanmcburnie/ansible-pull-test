@@ -1,40 +1,48 @@
-- name: Install required packages
-  ansible.builtin.apt:
-    name:
-      - git
-      - age
-      - awscli
-      - rsync
-      - tar
-      - util-linux
-      - python3-venv
-      - python3-pip
-    state: present
-    update_cache: true
+---
+- name: Configure Offen + Cottage backups for containerized Proxmox
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
 
-- name: Check whether Cottage is installed
-  ansible.builtin.command: /usr/local/bin/ctg --version
-  register: ctg_check
-  changed_when: false
-  failed_when: false
-
-- name: Create Cottage Python virtual environment
-  ansible.builtin.command: python3 -m venv /opt/cottage-venv
-  args:
-    creates: /opt/cottage-venv/bin/python
-  when: ctg_check.rc != 0
-
-- name: Upgrade pip inside Cottage venv
-  ansible.builtin.command: /opt/cottage-venv/bin/pip install --upgrade pip
-  when: ctg_check.rc != 0
-
-- name: Install Cottage inside dedicated venv
-  ansible.builtin.command: /opt/cottage-venv/bin/pip install cottage
-  when: ctg_check.rc != 0
-
-- name: Symlink ctg into system PATH
-  ansible.builtin.file:
-    src: /opt/cottage-venv/bin/ctg
-    dest: /usr/local/bin/ctg
-    state: link
-    force: true
+  tasks:
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - git
+          - age
+          - awscli
+          - rsync
+          - tar
+          - util-linux
+          - python3-venv
+          - python3-pip
+        state: present
+        update_cache: true
+    
+    - name: Check whether Cottage is installed
+      ansible.builtin.command: /usr/local/bin/ctg --version
+      register: ctg_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Create Cottage Python virtual environment
+      ansible.builtin.command: python3 -m venv /opt/cottage-venv
+      args:
+        creates: /opt/cottage-venv/bin/python
+      when: ctg_check.rc != 0
+    
+    - name: Upgrade pip inside Cottage venv
+      ansible.builtin.command: /opt/cottage-venv/bin/pip install --upgrade pip
+      when: ctg_check.rc != 0
+    
+    - name: Install Cottage inside dedicated venv
+      ansible.builtin.command: /opt/cottage-venv/bin/pip install cottage
+      when: ctg_check.rc != 0
+    
+    - name: Symlink ctg into system PATH
+      ansible.builtin.file:
+        src: /opt/cottage-venv/bin/ctg
+        dest: /usr/local/bin/ctg
+        state: link
+        force: true
