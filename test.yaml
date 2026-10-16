@@ -28,7 +28,7 @@ http {
     # Redirect plain HTTP to HTTPS
     server {
         listen 80;
-        server_name mcp.example.com;
+        server_name mcp-prod.us.payfactors.com;
         return 301 https://$host$request_uri;
     }
 
@@ -36,8 +36,8 @@ http {
         listen 443 ssl http2;
         server_name mcp.example.com;
 
-        ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
-        ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+        ssl_certificate     /etc/letsencrypt/live/mcp-prod.us.payfactors.com/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/mcp-prod.us.payfactors.com/privkey.pem;
         ssl_protocols       TLSv1.2 TLSv1.3;
         ssl_prefer_server_ciphers off;
 
@@ -47,14 +47,14 @@ http {
 
             # TLS to the backend (SNI and certificate verification)
             proxy_ssl_server_name on;
-            proxy_ssl_name        mcp.internal.example.com;   # name on the backend's cert
+            proxy_ssl_name        mcp-prod.us.payfactors.com;   # name on the backend's cert
             proxy_ssl_protocols   TLSv1.2 TLSv1.3;
             proxy_ssl_verify      on;
             proxy_ssl_verify_depth 2;
             proxy_ssl_trusted_certificate /etc/nginx/certs/backend-ca.pem;
 
             # Headers
-            proxy_set_header Host              mcp.internal.example.com;
+            proxy_set_header Host              mcp-prod.us.payfactors.com;
             proxy_set_header Connection        "";
             proxy_set_header X-Real-IP         $remote_addr;
             proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
